@@ -29,6 +29,34 @@ message SpacetimeEmbeddingResponse {
   string model = 3;
 }
 
+// Phase 6: batched lookup so the building head training and
+// inference pipelines can hydrate a whole block subgraph in
+// a single round trip instead of N. The frozen DyGFormer
+// produces 256-d embeddings; this endpoint returns those
+// vectors keyed by node_id.
+message BatchSpacetimeEmbeddingRequest {
+  civic_atlas.v1.TenantContext tenant_context = 1;
+  repeated string node_ids = 2;
+}
+
+message NodeEmbedding {
+  repeated float embedding = 1;
+  // True when the node had no embedding upstream and the server
+  // returned a zero vector. The training and inference paths use
+  // this flag to mask the slot rather than treat zeros as real.
+  bool missing = 2;
+}
+
+message BatchSpacetimeEmbeddingResponse {
+  // Keyed by node_id. Always present for every requested id,
+  // with `missing=true` when upstream had no embedding.
+  map<string, NodeEmbedding> embeddings = 1;
+  string model = 2;
+  // Version of the upstream Theseus model used. Phase 6 training
+  // pins to a single model version per run.
+  string model_version = 3;
+}
+
 message SearchObjectsRequest {
   civic_atlas.v1.TenantContext tenant_context = 1;
   string query = 2;
@@ -54,7 +82,10 @@ message IngestArtifactResponse {
 service TheseusBridge {
   rpc ResolveSpacetimeTopic(SpacetimeTopicRequest) returns (stream SpacetimeTopicChunk);
   rpc GetSpacetimeEmbedding(SpacetimeEmbeddingRequest) returns (SpacetimeEmbeddingResponse);
+  // Phase 6: batched version of GetSpacetimeEmbedding. Required
+  // by building_head_train and building_head_infer so a block
+  // subgraph of N nodes resolves in one call instead of N.
+  rpc GetBatchSpacetimeEmbeddings(BatchSpacetimeEmbeddingRequest) returns (BatchSpacetimeEmbeddingResponse);
   rpc SearchObjects(SearchObjectsRequest) returns (SearchObjectsResponse);
   rpc IngestArtifact(IngestArtifactRequest) returns (IngestArtifactResponse);
 }
-
