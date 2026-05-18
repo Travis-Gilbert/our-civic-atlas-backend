@@ -9,7 +9,10 @@
 # Run:     docker run -p 8080:8080 -e PORT=8080 civic-atlas-backend
 
 # --- stage 1: build ---------------------------------------------------
-FROM rust:1.85-slim-bookworm AS builder
+# rust:1.88 because several transitive deps (time, home, icu_*) require
+# rustc >= 1.86/1.88. Workspace's Cargo.toml rust-version declaration
+# is a min-version hint for downstream consumers, not a deps constraint.
+FROM rust:1.88-slim-bookworm AS builder
 
 # protoc is needed by tonic-build to compile civic_atlas.proto and
 # friends at build time. The civic-atlas-types build.rs invokes it.
