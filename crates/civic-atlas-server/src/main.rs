@@ -24,8 +24,25 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let state = AtlasState::from_env()?;
-    let http_addr = parse_addr(env::var("CIVIC_ATLAS_HTTP_ADDR").ok(), "127.0.0.1:4001")?;
-    let grpc_addr = parse_addr(env::var("CIVIC_ATLAS_GRPC_ADDR").ok(), "127.0.0.1:50051")?;
+    // Address resolution order for HTTP:
+    //   1. CIVIC_ATLAS_HTTP_ADDR  — explicit "host:port" wins (local dev)
+    //   2. PORT (e.g. Railway)    — bind to 0.0.0.0:$PORT so the platform
+    //                                load balancer can route traffic
+    //   3. 127.0.0.1:4001         — local default
+    let http_addr_str = env::var("CIVIC_ATLAS_HTTP_ADDR")
+        .ok()
+        .or_else(|| env::var("PORT").ok().map(|p| format!("0.0.0.0:{p}")));
+    let http_addr = parse_addr(http_addr_str, "127.0.0.1:4001")?;
+
+    // gRPC stays on its own port. Railway can either expose it via a
+    // separate service or keep it on the private network for the Node
+    // sidecar to reach. Default 0.0.0.0:50051 binds for both, so a
+    // deployed environment that wants gRPC reachable just exposes the
+    // port via Railway's networking UI.
+    let grpc_addr = parse_addr(
+        env::var("CIVIC_ATLAS_GRPC_ADDR").ok(),
+        "0.0.0.0:50051",
+    )?;
 
     let http_state = state.clone();
     tokio::spawn(async move {

@@ -1,0 +1,20 @@
+[build]
+builder = "RAILPACK"
+buildCommand = "cargo build --release --bin civic-atlas-server"
+
+[deploy]
+# Path inside the build image. Railpack's Rust template places release
+# artifacts under ./target/release/.
+startCommand = "./target/release/civic-atlas-server"
+
+# Probe the Axum health route. The server binds HTTP to 0.0.0.0:$PORT
+# (per main.rs PORT fallback), so Railway's healthchecker hits /healthz
+# on the platform's allocated port automatically.
+healthcheckPath = "/healthz"
+healthcheckTimeout = 30
+
+# On failure, retry rather than scale down to zero. Cargo workspace has
+# heavy deps (tonic, sqlx); cold restarts incur build cost so failure
+# tolerance matters during early iteration.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
