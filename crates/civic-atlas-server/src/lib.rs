@@ -18,10 +18,11 @@ use civic_atlas_types::civic_atlas::v1::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 use tenant_resolver::require_tenant_context;
 use tonic::{Request, Response, Status};
 use tracing::warn;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AtlasState {
@@ -231,15 +232,43 @@ impl SpacetimeAtlasGrpc for SpacetimeAtlasGrpcService {
         request: Request<GetBlockSubgraphRequest>,
     ) -> Result<Response<GetBlockSubgraphResponse>, Status> {
         let request = request.into_inner();
-        require_tenant_context(request.tenant_context.as_ref())
+        let tenant = require_tenant_context(request.tenant_context.as_ref())
             .map_err(|err| Status::unauthenticated(err.to_string()))?;
         if request.block_id.trim().is_empty() {
             return Err(Status::invalid_argument("block_id is required"));
         }
-        Ok(Response::new(GetBlockSubgraphResponse {
-            nodes: Vec::new(),
-            artifact_anchors: Vec::new(),
-        }))
+        // Read approved reconstruction parts for the block from PostGIS.
+        // The block is identified by reconstruction_specs.block_id (a text
+        // column populated when a spec is authored against a block). We
+        // gather:
+        //   - buildings whose latest approved spec is in this block
+        //   - building_parts of those buildings
+        //   - artifact_anchors attached to those buildings or parts
+        // Each is returned as a CivicObject with object_type set so the
+        // caller can dispatch.
+        match self.state.db_pool() {
+            Some(pool) => {
+                let depth = request.depth;
+                let nodes = fetch_block_subgraph_nodes(pool, tenant.as_str(), &request.block_id, depth)
+                    .await?;
+                let artifact_anchors =
+                    fetch_block_subgraph_artifact_anchors(pool, tenant.as_str(), &request.block_id)
+                        .await?;
+                Ok(Response::new(GetBlockSubgraphResponse {
+                    nodes,
+                    artifact_anchors,
+                }))
+            }
+            None => {
+                // Without DATABASE_URL the server runs against the fixture
+                // dataset (CIVIC_ATLAS_PLACES_FIXTURE). Return the legacy
+                // empty-response so existing smoke tests keep passing.
+                Ok(Response::new(GetBlockSubgraphResponse {
+                    nodes: Vec::new(),
+                    artifact_anchors: Vec::new(),
+                }))
+            }
+        }
     }
 
     async fn get_parcel_history(
@@ -586,4 +615,231 @@ mod tests {
             }
         ));
     }
+}
+
+// --- PostGIS-backed helpers for SpacetimeAtlasService ---------------------
+
+async fn fetch_block_subgraph_nodes(
+    pool: &PgPool,
+    tenant_slug: &str,
+    block_id: &str,
+    depth: u32,
+) -> Result<Vec<CivicObject>, Status> {
+    let mut tx = pool.begin().await.map_err(map_db_error)?;
+    let tenant_id = resolve_tenant_uuid(&mut tx, tenant_slug).await?;
+    set_tx_tenant_uuid(&mut tx, tenant_id).await?;
+
+    // Buildings in the block come from reconstruction_specs.block_id. A
+    // building "belongs to" the block if its latest approved spec
+    // references that block. depth=1 returns those buildings and their
+    // parts. depth>=2 expands to neighbor buildings (TODO: implement
+    // neighbor logic via parcels.geom ST_DWithin; out of scope for
+    // the Phase 4 gate).
+    let _ = depth; // depth>=2 expansion pending RustyRed integration
+
+    let buildings_rows = sqlx::query(
+        r#"
+        SELECT DISTINCT b.id, b.civic_object_id, b.t_start_ms, b.t_end_ms,
+                        ST_AsGeoJSON(b.geom) AS geometry_json,
+                        b.properties
+        FROM buildings b
+        INNER JOIN reconstruction_specs rs
+          ON rs.tenant_id = b.tenant_id
+         AND rs.building_id = b.id
+        WHERE b.tenant_id = $1
+          AND rs.block_id = $2
+          AND rs.status = 'approved'
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(block_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(map_db_error)?;
+
+    let mut nodes: Vec<CivicObject> = Vec::with_capacity(buildings_rows.len() * 4);
+    let mut building_uuids: Vec<Uuid> = Vec::with_capacity(buildings_rows.len());
+    for row in &buildings_rows {
+        let id: Uuid = row.try_get("id").map_err(map_db_error)?;
+        let civic_object_id: String = row.try_get("civic_object_id").unwrap_or_default();
+        let t_start: Option<i64> = row.try_get("t_start_ms").unwrap_or(None);
+        let t_end: Option<i64> = row.try_get("t_end_ms").unwrap_or(None);
+        let geometry_json: Option<String> = row.try_get("geometry_json").unwrap_or_default();
+        building_uuids.push(id);
+        nodes.push(CivicObject {
+            id: id.to_string(),
+            tenant_id: tenant_slug.to_string(),
+            name: civic_object_id.clone(),
+            object_type: "building".to_string(),
+            geometry_json: geometry_json.unwrap_or_default(),
+            time_start_ms: t_start,
+            time_end_ms: t_end,
+            confidence: 1.0,
+            source_ids: Vec::new(),
+            dossier_path: format!("/dossier/building/{}", civic_object_id),
+            attributes: Default::default(),
+        });
+    }
+
+    // Building parts of those buildings.
+    if !building_uuids.is_empty() {
+        let part_rows = sqlx::query(
+            r#"
+            SELECT bp.id, bp.building_id, bp.part_key, bp.part_type,
+                   bp.confidence, bp.source_ids,
+                   ST_AsGeoJSON(bp.geom) AS geometry_json,
+                   bp.t_start_ms, bp.t_end_ms
+            FROM building_parts bp
+            WHERE bp.tenant_id = $1
+              AND bp.building_id = ANY($2)
+            ORDER BY bp.building_id, bp.part_key
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(&building_uuids[..])
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_db_error)?;
+
+        for row in &part_rows {
+            let id: Uuid = row.try_get("id").map_err(map_db_error)?;
+            let building_id: Uuid = row.try_get("building_id").unwrap_or_default();
+            let part_key: String = row.try_get("part_key").unwrap_or_default();
+            let part_type: String = row.try_get("part_type").unwrap_or_default();
+            let confidence: f64 = row.try_get("confidence").unwrap_or(0.0);
+            let source_ids: Vec<String> = row.try_get("source_ids").unwrap_or_default();
+            let geometry_json: Option<String> = row.try_get("geometry_json").unwrap_or_default();
+            let t_start: Option<i64> = row.try_get("t_start_ms").unwrap_or(None);
+            let t_end: Option<i64> = row.try_get("t_end_ms").unwrap_or(None);
+            nodes.push(CivicObject {
+                id: id.to_string(),
+                tenant_id: tenant_slug.to_string(),
+                name: format!("{}::{}", building_id, part_key),
+                object_type: format!("building_part::{part_type}"),
+                geometry_json: geometry_json.unwrap_or_default(),
+                time_start_ms: t_start,
+                time_end_ms: t_end,
+                confidence,
+                source_ids,
+                dossier_path: format!("/dossier/building_part/{}", id),
+                attributes: Default::default(),
+            });
+        }
+    }
+
+    tx.commit().await.map_err(map_db_error)?;
+    Ok(nodes)
+}
+
+async fn fetch_block_subgraph_artifact_anchors(
+    pool: &PgPool,
+    tenant_slug: &str,
+    block_id: &str,
+) -> Result<Vec<CivicObject>, Status> {
+    let mut tx = pool.begin().await.map_err(map_db_error)?;
+    let tenant_id = resolve_tenant_uuid(&mut tx, tenant_slug).await?;
+    set_tx_tenant_uuid(&mut tx, tenant_id).await?;
+
+    // Artifact anchors are scoped to buildings (or their parts) that
+    // belong to this block via the approved-spec linkage.
+    let rows = sqlx::query(
+        r#"
+        SELECT aa.id, aa.artifact_id, aa.anchor_kind,
+               ST_AsGeoJSON(aa.geom) AS geometry_json,
+               aa.t_start_ms, aa.t_end_ms,
+               a.title, a.source_type
+        FROM artifact_anchors aa
+        INNER JOIN artifacts a
+          ON a.tenant_id = aa.tenant_id AND a.id = aa.artifact_id
+        WHERE aa.tenant_id = $1
+          AND (
+               aa.building_id IN (
+                  SELECT DISTINCT b.id FROM buildings b
+                  INNER JOIN reconstruction_specs rs
+                    ON rs.tenant_id = b.tenant_id AND rs.building_id = b.id
+                  WHERE b.tenant_id = $1
+                    AND rs.block_id = $2
+                    AND rs.status = 'approved'
+               )
+            OR aa.building_part_id IN (
+                  SELECT DISTINCT bp.id FROM building_parts bp
+                  INNER JOIN buildings b
+                    ON b.tenant_id = bp.tenant_id AND b.id = bp.building_id
+                  INNER JOIN reconstruction_specs rs
+                    ON rs.tenant_id = b.tenant_id AND rs.building_id = b.id
+                  WHERE bp.tenant_id = $1
+                    AND rs.block_id = $2
+                    AND rs.status = 'approved'
+               )
+          )
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(block_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(map_db_error)?;
+
+    let mut anchors: Vec<CivicObject> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let id: Uuid = row.try_get("id").map_err(map_db_error)?;
+        let artifact_id: Uuid = row.try_get("artifact_id").unwrap_or_default();
+        let anchor_kind: String = row.try_get("anchor_kind").unwrap_or_default();
+        let title: String = row.try_get("title").unwrap_or_default();
+        let source_type: String = row.try_get("source_type").unwrap_or_default();
+        let geometry_json: Option<String> = row.try_get("geometry_json").unwrap_or_default();
+        let t_start: Option<i64> = row.try_get("t_start_ms").unwrap_or(None);
+        let t_end: Option<i64> = row.try_get("t_end_ms").unwrap_or(None);
+
+        let mut attributes = std::collections::HashMap::new();
+        attributes.insert("anchor_kind".to_string(), anchor_kind);
+        attributes.insert("source_type".to_string(), source_type);
+        attributes.insert("artifact_id".to_string(), artifact_id.to_string());
+
+        anchors.push(CivicObject {
+            id: id.to_string(),
+            tenant_id: tenant_slug.to_string(),
+            name: title,
+            object_type: "artifact_anchor".to_string(),
+            geometry_json: geometry_json.unwrap_or_default(),
+            time_start_ms: t_start,
+            time_end_ms: t_end,
+            confidence: 0.0,
+            source_ids: vec![artifact_id.to_string()],
+            dossier_path: format!("/dossier/artifact/{}", artifact_id),
+            attributes,
+        });
+    }
+
+    tx.commit().await.map_err(map_db_error)?;
+    Ok(anchors)
+}
+
+fn map_db_error(error: sqlx::Error) -> Status {
+    Status::internal(format!("database error: {error}"))
+}
+
+async fn resolve_tenant_uuid(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_slug: &str,
+) -> Result<Uuid, Status> {
+    let row = sqlx::query("SELECT id FROM tenants WHERE slug = $1")
+        .bind(tenant_slug)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_db_error)?;
+    row.and_then(|row| row.try_get::<Uuid, _>("id").ok())
+        .ok_or_else(|| Status::unauthenticated(format!("unknown tenant: {tenant_slug}")))
+}
+
+async fn set_tx_tenant_uuid(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+) -> Result<(), Status> {
+    sqlx::query("SELECT set_config('app.tenant_id', $1, true)")
+        .bind(tenant_id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(map_db_error)?;
+    Ok(())
 }

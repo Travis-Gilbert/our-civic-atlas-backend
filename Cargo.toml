@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/civic-atlas-cli",
+    "crates/civic-atlas-outbox-worker",
     "crates/civic-atlas-server",
     "crates/civic-atlas-types",
     "crates/tenant-resolver",
