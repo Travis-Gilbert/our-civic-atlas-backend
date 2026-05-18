@@ -254,7 +254,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "civic-atlas-types",
+ "prost",
  "serde",
  "serde_json",
  "sqlx",

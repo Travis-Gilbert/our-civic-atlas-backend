@@ -1,0 +1,279 @@
+syntax = "proto3";
+
+package civic_atlas.v1;
+
+import "civic_atlas/v1/civic_atlas.proto";
+import "civic_atlas/v1/reconstruction.proto";
+
+// Phase 4 community correction loop. Layered on top of the
+// polymorphic `corrections` table from migration 0002.
+//
+// A correction targets one entity (target_type + target_id) and
+// proposes a change carried in payload_jsonb. Anonymous submissions
+// are allowed but rate-limited per IP hash. Moderator approval
+// produces a new ReconstructionSpec version (or other entity update)
+// and a public ChangelogEntry. Rejections retain the submission as a
+// training example but never project to RustyRed or appear in the
+// public changelog.
+
+// Mirrors the SQL CHECK constraint on `corrections.target_type` in
+// migration 0002_reconstruction_truth_schema.sql.
+enum CorrectionTargetType {
+  CORRECTION_TARGET_TYPE_UNSPECIFIED = 0;
+  CORRECTION_TARGET_TYPE_PARCEL = 1;
+  CORRECTION_TARGET_TYPE_BUILDING = 2;
+  CORRECTION_TARGET_TYPE_BUILDING_PART = 3;
+  CORRECTION_TARGET_TYPE_ARTIFACT = 4;
+  CORRECTION_TARGET_TYPE_ARTIFACT_ANCHOR = 5;
+  CORRECTION_TARGET_TYPE_RECONSTRUCTION_SPEC = 6;
+  CORRECTION_TARGET_TYPE_GENERATED_ASSET = 7;
+}
+
+// Mirrors the SQL CHECK constraint on `corrections.status`.
+enum CorrectionStatus {
+  CORRECTION_STATUS_UNSPECIFIED = 0;
+  CORRECTION_STATUS_OPEN = 1;
+  CORRECTION_STATUS_ACCEPTED = 2;
+  CORRECTION_STATUS_REJECTED = 3;
+  CORRECTION_STATUS_SUPERSEDED = 4;
+}
+
+// Concrete correction subtype. Drives moderation UX and payload
+// schema interpretation.
+enum CorrectionKind {
+  CORRECTION_KIND_UNSPECIFIED = 0;
+  // Resident-submitted change to one or more parts of an approved
+  // ReconstructionSpec. Payload carries a sparse ReconstructionSpec
+  // with only the affected parts populated.
+  CORRECTION_KIND_COMMUNITY_PART_CORRECTION = 1;
+  // Resident-submitted artifact attachment (a photo, a deed scan,
+  // an oral history). Payload carries the ingested ArtifactAnchor's
+  // ID and a reasoning note.
+  CORRECTION_KIND_COMMUNITY_ARTIFACT_ATTACHMENT = 2;
+  // Hand-authored correction by a moderator working through the
+  // admin queue. Used when the moderator notices something during
+  // review that doesn't fit a resident submission.
+  CORRECTION_KIND_MODERATOR_EDIT = 3;
+}
+
+// One per-part proposed change. Wraps the part envelope from
+// reconstruction.proto. A submission can carry multiple PartChanges
+// when the resident touched several parts.
+//
+// `part_selector` is a JSON path-ish string identifying the part:
+//   "mass"
+//   "facades[0]"
+//   "facades[0].opening_grids[1]"
+//   "roof"
+//   "ornaments[ornament_id=front_cornice]"
+//   "ground_floor"
+//
+// Sparse parts: only fields the resident actually proposed values for
+// are populated. Empty strings and zero values are NOT proposed
+// values unless explicitly flagged in `proposed_field_paths`.
+message PartChange {
+  string part_selector = 1;
+  // The proposed part envelope. Only the parts whose selector
+  // matches in this submission carry data.
+  Mass mass = 2;
+  Facade facade = 3;
+  OpeningGrid opening_grid = 4;
+  Roof roof = 5;
+  Ornament ornament = 6;
+  GroundFloor ground_floor = 7;
+  // Optional: which scalar fields on the carried part are intended
+  // as proposed. Allows distinguishing "I propose stories=0" from
+  // "stories was not part of my proposal". If empty, the moderator
+  // takes the whole part as proposed.
+  repeated string proposed_field_paths = 8;
+}
+
+// The body of a correction submission. Stored in the polymorphic
+// `corrections.payload_jsonb`. The reverse mapping (this proto into
+// the JSONB column and back) is owned by the corrections service.
+message CommunityCorrectionPayload {
+  // Resident reasoning. Plain text, displayed to moderators and
+  // (anonymized) in the public changelog on acceptance.
+  string reasoning = 1;
+  // Artifacts the resident attached as evidence. These were already
+  // ingested via TheseusBridge.IngestArtifact before submission.
+  repeated string evidence_artifact_ids = 2;
+  // One PartChange per affected part. May be empty for
+  // KIND_COMMUNITY_ARTIFACT_ATTACHMENT (artifact alone is the
+  // change). Required for KIND_COMMUNITY_PART_CORRECTION.
+  repeated PartChange part_changes = 3;
+  // Optional client-supplied evidence URL the resident wanted to
+  // reference but couldn't pre-ingest. Server-side a moderator
+  // ingests it before approval.
+  string evidence_uri_hint = 4;
+}
+
+message CorrectionSubmission {
+  // Server-assigned UUID. Empty on SubmitCorrection request.
+  string id = 1;
+  // Required. Mirrors corrections.tenant_id.
+  TenantContext tenant_context = 2;
+  // Client-supplied stable key. Used for idempotency on retry.
+  // Must be unique per tenant. If absent the server generates one.
+  string correction_key = 3;
+  CorrectionTargetType target_type = 4;
+  // UUID of the targeted entity in PostGIS. For building_part
+  // corrections, this is the building_parts.id; for reconstruction
+  // spec corrections, this is the reconstruction_specs.id.
+  string target_id = 5;
+  CorrectionKind kind = 6;
+  CorrectionStatus status = 7;
+  // Submitter identity. Empty `submitted_by` means anonymous.
+  // `submitter_ip_hash` is server-stamped on submit for rate
+  // limiting and is never exposed in responses to non-admin clients.
+  string submitted_by = 8;
+  string submitter_ip_hash = 9;
+  // The actual correction body. Always serialized into the SQL row's
+  // payload_jsonb on submit.
+  CommunityCorrectionPayload payload = 10;
+  // Moderator review fields. Empty on submit; populated on
+  // approve/reject.
+  string reviewed_by = 11;
+  optional int64 reviewed_at_ms = 12;
+  string moderator_notes = 13;
+  // On accept, the per-part merge selections the moderator made.
+  // Each entry is a part_selector from one of the submission's
+  // PartChanges. Empty list on a reject.
+  repeated string accepted_part_selectors = 14;
+  // The merged spec version that resulted from accepting. Set only
+  // for CORRECTION_KIND_COMMUNITY_PART_CORRECTION accepts. Points at
+  // reconstruction_specs.(spec_id, version).
+  string resulting_spec_id = 15;
+  uint32 resulting_spec_version = 16;
+  optional int64 created_at_ms = 17;
+}
+
+// One entry in the public, anonymized changelog at
+// /open-flint-atlas/changelog. Created on correction acceptance.
+message ChangelogEntry {
+  string id = 1;
+  TenantContext tenant_context = 2;
+  // The correction that produced this entry. Server links it.
+  string correction_id = 3;
+  // Public title generated server-side from the correction's
+  // target type, target name, and the kind of change. No submitter
+  // identity is included.
+  string public_title = 4;
+  // Public summary generated server-side. Reasoning text is
+  // sanitized; submitter identity is removed; only the change
+  // semantics remain.
+  string public_summary = 5;
+  // The new spec version created (if any).
+  string resulting_spec_id = 6;
+  uint32 resulting_spec_version = 7;
+  optional int64 published_at_ms = 8;
+}
+
+message SubmitCorrectionRequest {
+  CorrectionSubmission submission = 1;
+}
+
+message SubmitCorrectionResponse {
+  CorrectionSubmission submission = 1;
+}
+
+message ListCorrectionsForBuildingRequest {
+  TenantContext tenant_context = 1;
+  // Building UUID. Lists corrections targeting this building OR
+  // any of its building_parts.
+  string building_id = 2;
+  CorrectionStatus status_filter = 3;
+  uint32 page_size = 4;
+  string page_token = 5;
+}
+
+message ListCorrectionsForBuildingResponse {
+  repeated CorrectionSubmission submissions = 1;
+  string next_page_token = 2;
+}
+
+message ListPendingCorrectionsRequest {
+  TenantContext tenant_context = 1;
+  // Optional: scope to a single correction kind.
+  CorrectionKind kind_filter = 2;
+  uint32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListPendingCorrectionsResponse {
+  repeated CorrectionSubmission submissions = 1;
+  string next_page_token = 2;
+}
+
+message ApproveCorrectionRequest {
+  TenantContext tenant_context = 1;
+  string correction_id = 2;
+  // Empty list = accept the whole submission. Non-empty = accept
+  // only these part_selectors.
+  repeated string accepted_part_selectors = 3;
+  string approved_by = 4;
+  string moderator_notes = 5;
+}
+
+message ApproveCorrectionResponse {
+  CorrectionSubmission submission = 1;
+  // Set when approval produced a new ReconstructionSpec version.
+  ChangelogEntry changelog_entry = 2;
+}
+
+message RejectCorrectionRequest {
+  TenantContext tenant_context = 1;
+  string correction_id = 2;
+  string rejected_by = 3;
+  string moderator_notes = 4;
+}
+
+message RejectCorrectionResponse {
+  CorrectionSubmission submission = 1;
+}
+
+message ListChangelogEntriesRequest {
+  TenantContext tenant_context = 1;
+  uint32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListChangelogEntriesResponse {
+  repeated ChangelogEntry entries = 1;
+  string next_page_token = 2;
+}
+
+// Export training data from the corrections corpus. Both approved
+// and rejected corrections are exported as labeled examples.
+// Approved entries are positive labels; rejected entries are
+// negative labels. The civic-atlas-cli `export corrections`
+// subcommand wraps this RPC.
+message ExportCorrectionsTrainingDataRequest {
+  TenantContext tenant_context = 1;
+  // Minimum created_at_ms to include. Zero means no lower bound.
+  int64 since_ms = 2;
+  uint32 page_size = 3;
+  string page_token = 4;
+}
+
+message TrainingExample {
+  CorrectionSubmission submission = 1;
+  // True for approved corrections (positive labels), false for
+  // rejected corrections (negative labels).
+  bool positive_label = 2;
+}
+
+message ExportCorrectionsTrainingDataResponse {
+  repeated TrainingExample examples = 1;
+  string next_page_token = 2;
+}
+
+service CorrectionService {
+  rpc SubmitCorrection(SubmitCorrectionRequest) returns (SubmitCorrectionResponse);
+  rpc ListCorrectionsForBuilding(ListCorrectionsForBuildingRequest) returns (ListCorrectionsForBuildingResponse);
+  rpc ListPendingCorrections(ListPendingCorrectionsRequest) returns (ListPendingCorrectionsResponse);
+  rpc ApproveCorrection(ApproveCorrectionRequest) returns (ApproveCorrectionResponse);
+  rpc RejectCorrection(RejectCorrectionRequest) returns (RejectCorrectionResponse);
+  rpc ListChangelogEntries(ListChangelogEntriesRequest) returns (ListChangelogEntriesResponse);
+  rpc ExportCorrectionsTrainingData(ExportCorrectionsTrainingDataRequest) returns (ExportCorrectionsTrainingDataResponse);
+}

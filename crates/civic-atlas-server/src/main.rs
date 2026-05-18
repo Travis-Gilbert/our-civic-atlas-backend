@@ -1,11 +1,13 @@
 use std::env;
 
 use civic_atlas_server::{
-    http_router, parse_addr, reconstruction::ReconstructionGrpcService, AtlasState,
-    CivicAtlasGrpcService, SpacetimeAtlasGrpcService,
+    corrections::CorrectionGrpcService, http_router, parse_addr,
+    reconstruction::ReconstructionGrpcService, AtlasState, CivicAtlasGrpcService,
+    SpacetimeAtlasGrpcService,
 };
 use civic_atlas_types::civic_atlas::v1::{
     civic_atlas_service_server::CivicAtlasServiceServer,
+    correction_service_server::CorrectionServiceServer,
     reconstruction_service_server::ReconstructionServiceServer,
     spacetime_atlas_service_server::SpacetimeAtlasServiceServer,
 };
@@ -47,8 +49,11 @@ async fn main() -> anyhow::Result<()> {
             SpacetimeAtlasGrpcService::new(state.clone()),
         ))
         .add_service(ReconstructionServiceServer::new(
-            ReconstructionGrpcService::new(state),
+            ReconstructionGrpcService::new(state.clone()),
         ))
+        .add_service(CorrectionServiceServer::new(CorrectionGrpcService::new(
+            state,
+        )))
         .serve(grpc_addr)
         .await?;
 
