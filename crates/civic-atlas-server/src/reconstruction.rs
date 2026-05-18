@@ -888,6 +888,10 @@ fn provenance_from_json(value: &Value) -> PartProvenance {
             .and_then(Value::as_bool)
             .unwrap_or_default(),
         reviewer_note: string_json_any(value, &["reviewerNote", "reviewer_note"]),
+        coverage_quality: get_any(value, &["coverageQuality", "coverage_quality"])
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
+        gnn_version: string_json_any(value, &["gnnVersion", "gnn_version"]),
     }
 }
 

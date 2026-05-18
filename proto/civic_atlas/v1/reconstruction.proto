@@ -39,6 +39,19 @@ message PartProvenance {
   double confidence = 2;
   bool from_gnn_prior = 3;
   string reviewer_note = 4;
+  // Phase 5 extension. 0-1 score indicating how authoritative the
+  // source lanes are for this part (assessor records score high,
+  // OSM-inferred low, footprint-only lowest). Used by Phase 6 training
+  // to weight the loss per record. Defaults to 0 when unset, which
+  // the training pass interprets as "no signal". Hand-authored specs
+  // can leave this empty and let approval flow populate it from the
+  // moderator's evidence rating.
+  double coverage_quality = 5;
+  // Phase 6 extension. Populated when `from_gnn_prior=true` to record
+  // which model version produced the prior. Empty when the part is
+  // not GNN-derived. Format: `<repo>/<short_sha>` or `v<semver>`
+  // depending on the training artifact's manifest.
+  string gnn_version = 6;
 }
 
 message DimensionRange {
