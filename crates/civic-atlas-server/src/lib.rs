@@ -2,6 +2,7 @@ pub mod corrections;
 pub mod fixture;
 pub mod reconstruction;
 pub mod tenant_db;
+pub mod validation;
 
 use std::{env, net::SocketAddr, sync::Arc};
 

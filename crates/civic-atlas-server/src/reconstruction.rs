@@ -196,6 +196,34 @@ impl ReconstructionGrpc for ReconstructionGrpcService {
             upsert_building_part(&mut tx, tenant_id, building_id, &part).await?;
         }
 
+        // Geographic claim triangulation. Runs cheap point-in-polygon
+        // checks against the tenant bbox + named district (parsed
+        // from spec.block_id). Any disagreements get appended to
+        // `place_provenance_disputes` for moderator / ACC/ACT review.
+        // These are advisory: the approval proceeds either way.
+        let block_id_opt = if spec.block_id.trim().is_empty() {
+            None
+        } else {
+            Some(spec.block_id.as_str())
+        };
+        let disputes = crate::validation::validate_building_against_spec(
+            &mut tx,
+            tenant_id,
+            building_id,
+            &spec.spec_id,
+            block_id_opt,
+        )
+        .await?;
+        if !disputes.is_empty() {
+            tracing::warn!(
+                spec_id = %spec.spec_id,
+                building_id = %building_id,
+                dispute_count = disputes.len(),
+                "geographic claim disagreement detected on spec approval"
+            );
+            crate::validation::record_disputes(&mut tx, tenant_id, &disputes).await?;
+        }
+
         spec.status = ReconstructionSpecStatus::Approved as i32;
         spec.reviewed_by = request.approved_by;
         let update = sqlx::query(
