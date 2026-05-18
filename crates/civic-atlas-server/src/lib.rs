@@ -274,8 +274,9 @@ impl SpacetimeAtlasGrpc for SpacetimeAtlasGrpcService {
         match self.state.db_pool() {
             Some(pool) => {
                 let depth = request.depth;
-                let nodes = fetch_block_subgraph_nodes(pool, tenant.as_str(), &request.block_id, depth)
-                    .await?;
+                let nodes =
+                    fetch_block_subgraph_nodes(pool, tenant.as_str(), &request.block_id, depth)
+                        .await?;
                 let artifact_anchors =
                     fetch_block_subgraph_artifact_anchors(pool, tenant.as_str(), &request.block_id)
                         .await?;

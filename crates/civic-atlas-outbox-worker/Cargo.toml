@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+civic-atlas-reconstruction-engine = { path = "../civic-atlas-reconstruction-engine" }
 civic-atlas-types = { path = "../civic-atlas-types" }
 clap.workspace = true
 serde.workspace = true

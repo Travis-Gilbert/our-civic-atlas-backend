@@ -1,0 +1,21 @@
+[package]
+name = "civic-atlas-reconstruction-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Procedural reconstruction algorithm stages for Our Civic Atlas"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+civic-atlas-types = { path = "../civic-atlas-types" }
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+theseus-client = { path = "../theseus-client" }
+tonic.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

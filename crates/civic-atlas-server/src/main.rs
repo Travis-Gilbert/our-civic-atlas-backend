@@ -40,10 +40,7 @@ async fn main() -> anyhow::Result<()> {
     // sidecar to reach. Default 0.0.0.0:50051 binds for both, so a
     // deployed environment that wants gRPC reachable just exposes the
     // port via Railway's networking UI.
-    let grpc_addr = parse_addr(
-        env::var("CIVIC_ATLAS_GRPC_ADDR").ok(),
-        "0.0.0.0:50051",
-    )?;
+    let grpc_addr = parse_addr(env::var("CIVIC_ATLAS_GRPC_ADDR").ok(), "0.0.0.0:50051")?;
 
     let http_state = state.clone();
     tokio::spawn(async move {

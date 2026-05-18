@@ -49,9 +49,9 @@ impl CorrectionGrpcService {
     }
 
     fn pool(&self) -> Result<&PgPool, Status> {
-        self.state.db_pool().ok_or_else(|| {
-            Status::unavailable("DATABASE_URL is required for CorrectionService")
-        })
+        self.state
+            .db_pool()
+            .ok_or_else(|| Status::unavailable("DATABASE_URL is required for CorrectionService"))
     }
 }
 
@@ -715,7 +715,11 @@ fn community_payload_from_json(value: &Value) -> CommunityCorrectionPayload {
         evidence_artifact_ids: value
             .get("evidence_artifact_ids")
             .and_then(Value::as_array)
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default(),
         part_changes: Vec::new(),
         evidence_uri_hint: value

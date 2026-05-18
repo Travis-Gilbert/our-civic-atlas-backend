@@ -82,14 +82,8 @@ pub async fn validate_building_against_spec(
     }
 
     if let Some(slug) = block_id.and_then(district_slug_from_block_id) {
-        if let Some(d) = validate_building_in_claimed_district(
-            tx,
-            tenant_id,
-            building_id,
-            spec_id,
-            slug,
-        )
-        .await?
+        if let Some(d) =
+            validate_building_in_claimed_district(tx, tenant_id, building_id, spec_id, slug).await?
         {
             disputes.push(d);
         }

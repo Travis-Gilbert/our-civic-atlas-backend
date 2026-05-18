@@ -49,6 +49,8 @@ lower-level composition of H3 space and node time intervals.
 | OCA-BE-P2-001 | Add ReconstructionSpec proto and generated type gates. | backend proto + TS/Python generation | execute | Rust proto generation includes ReconstructionSpec and ReconstructionService; checked-in TypeScript (`ts-proto`) and Python (`grpcio-tools`) artifacts regenerate cleanly and stale output fails CI. | `cargo test --workspace`, `npm run proto:check`, `npm run proto:shape` | Spec versions diverge. | done |
 | OCA-BE-P2-002 | Add PostGIS reconstruction truth schema. | migrations | execute | Immutable approved specs, building parts, artifacts, anchors, generated assets, corrections, and RLS exist. | migration tests | RustyRed originates truth. | done |
 | OCA-BE-P2-003 | Implement approval projection job. | backend jobs | execute | Approved spec writes PostGIS parts first, then idempotently projects summary to RustyRed. | replay tests | Partial projection corrupts graph state. | partial |
+| OCA-BE-P2-004 | Implement procedural reconstruction engine. | algorithm spec + backend crate | execute | Eight stages are represented as typed contracts: evidence bundle, direct extraction, block subgraph, spacetime embeddings, Pairformer-ready prior inference, direct-wins merge, Scene Foundry manifest, and PostGIS persistence handoff. | `cargo test -p civic-atlas-reconstruction-engine` | Algorithm remains a handwritten seed path only. | partial |
+| OCA-BE-P2-005 | Add tenant-scoped reconstruction job queue. | worker + migration | execute | `reconstruction_jobs` can run the full engine from parcel/time slice, write an in-review spec, and optionally auto-approve into parts plus projection outbox. | worker compile, migration test | Pipeline cannot run outside a human curator call. | partial |
 | OCA-BE-P3-001 | Create Blender primitive library repo. | new repo | execute | Eight parameterized archetypes exist and are addressed by spec fields. | asset metadata validation | Assets become hand-authored one-offs. | planned |
 | OCA-BE-P3-002 | Add Modal Scene Foundry renderer. | Modal app | execute | `render_spec_to_glb` uploads deterministic GLB asset path by tenant/spec/version/hash. | Modal smoke | Asset generation lacks replayability. | planned |
 | OCA-BE-P3-003 | Add Carriage Town frontend route. | public atlas route | execute | Route fetches 20 specs through GraphQL and renders GLBs over MapLibre/deck.gl with per-part confidence. | browser screenshots | R3F replaces the map base. | planned |
@@ -90,6 +92,19 @@ the existing unused `SimpleMeshLayer` warning in `AtlasMap.tsx`.
 | Multi-tenancy probe | Every new Phase 2 table has `tenant_id`, RLS enabled, and a `current_setting('app.tenant_id', true)` policy asserted by `reconstruction_truth_schema.rs`. |
 | Approval ordering | `ReconstructionService.ApproveSpec` writes part-level `building_parts`, updates the spec to approved, then inserts an idempotent projection outbox intent in the same transaction. |
 | CLI | `civic-atlas spec validate <file>` validates tenant/spec/version and part-level confidence. `civic-atlas spec submit <file>` writes an in-review spec into PostGIS. |
+
+## Procedural Reconstruction Algorithm Addendum
+
+| Stage | Runtime surface | Current implementation |
+|---|---|---|
+| 1. Evidence Assembly | `civic-atlas-reconstruction-engine::assemble_evidence` | Reads parcel history, direct artifacts, adjacent artifacts, and temporal predecessor/successor through an `EvidenceRepository` port. PostGIS and in-memory adapters exist. |
+| 2. Direct Field Extraction | `extract_direct` | Deterministic Sanborn/photo/directory/text extraction populates directly observed fields with part provenance. |
+| 3. Block Subgraph Construction | `build_block_subgraph` | Wraps a `BlockSubgraphRepository` port and hydrates focus node direct extraction. |
+| 4. Spacetime Embedding Hydration | `hydrate_embeddings` | Calls `GetBatchSpacetimeEmbeddings` when `THESEUS_BRIDGE_URL` is set; otherwise uses explicit zero embeddings with `missing_embedding=true`. |
+| 5. Block-Coherent Prior Inference | `PairformerCivicPriorModel` | Stage contract is Pairformer-ready: node features combine spacetime embeddings and direct-field counts; edge features preserve relation, distance, time distance, shared-wall/setback slots; publishable edge confidence records are emitted. The current model is a deterministic fallback until the civic Pairformer weights ship. |
+| 6. Evidence-Prior Merge | `merge_evidence_prior` | Direct extraction wins; low-confidence direct values that disagree with priors become explicit merge conflicts. |
+| 7. Geometry + Asset Generation | `SceneFoundryManifestGenerator` | Emits a queued Scene Foundry manifest and asset slot. Blender/Modal execution remains a downstream renderer integration. |
+| 8. Spec Persistence + Public Surface | `civic-atlas-outbox-worker` | `reconstruction_jobs` persist generated specs to PostGIS and can auto-approve to `building_parts`, `generated_assets`, and projection outbox. |
 
 Validation evidence from this slice:
 

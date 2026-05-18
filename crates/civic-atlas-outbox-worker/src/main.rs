@@ -19,10 +19,19 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use civic_atlas_reconstruction_engine::{
+    attach_manifest_to_spec, reconstruction_part_records, reconstruction_spec_to_json,
+    run_full_pipeline, PairformerCivicPriorModel, PipelineOutput, PostgisRepository,
+    ReconstructionRequest, SceneFoundryManifestGenerator, TheseusBatchEmbeddingProvider,
+    ZeroEmbeddingProvider,
+};
+use civic_atlas_types::civic_atlas::v1::{
+    ReconstructionSpec, ReconstructionSpecStatus, TenantContext, TimeSlice,
+};
 use clap::Parser;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, types::Json, PgPool, Postgres, Row, Transaction};
 use tokio::signal;
 use tokio::time::sleep;
@@ -59,6 +68,19 @@ struct Args {
     /// capped at 1 hour. Exponential.
     #[arg(long, env = "OUTBOX_BACKOFF_BASE_SECS", default_value_t = 15)]
     backoff_base_secs: i64,
+
+    /// Maximum procedural reconstruction jobs claimed per poll.
+    #[arg(long, env = "RECONSTRUCTION_JOB_BATCH_SIZE", default_value_t = 4)]
+    reconstruction_job_batch_size: u32,
+
+    /// Prefix used by the Scene Foundry manifest generator while the
+    /// Blender/Modal renderer is queued or stubbed.
+    #[arg(
+        long,
+        env = "SCENE_FOUNDRY_URI_PREFIX",
+        default_value = "scene-foundry://queued"
+    )]
+    scene_foundry_uri_prefix: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +93,34 @@ struct BuildingPresencePayload {
     building_id: String,
     #[serde(rename = "civicObjectId")]
     civic_object_id: String,
+}
+
+#[derive(Debug)]
+struct ReconstructionJobRow {
+    id: Uuid,
+    tenant_id: Uuid,
+    parcel_id: String,
+    time_slice: TimeSlice,
+    requested_by: String,
+    auto_approve: bool,
+    attempt_count: i32,
+}
+
+#[derive(Debug)]
+struct ProcessedReconstruction {
+    spec_id: String,
+    spec_version: u32,
+    stage_report: Value,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TimeSlicePayload {
+    #[serde(default, alias = "atMs")]
+    at_ms: Option<i64>,
+    #[serde(default, alias = "startMs")]
+    start_ms: Option<i64>,
+    #[serde(default, alias = "endMs")]
+    end_ms: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -125,7 +175,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_one_poll(pool: &PgPool, args: &Args) -> () {
-    match claim_and_process(pool, args).await {
+    match claim_and_process_all(pool, args).await {
         Ok(rows_handled) => {
             if rows_handled == 0 {
                 debug!("outbox empty; sleeping {}s", args.poll_interval_secs);
@@ -141,6 +191,341 @@ async fn run_one_poll(pool: &PgPool, args: &Args) -> () {
             sleep(Duration::from_secs(5)).await;
         }
     }
+}
+
+async fn claim_and_process_all(pool: &PgPool, args: &Args) -> Result<usize> {
+    let reconstruction_jobs = claim_and_process_reconstruction_jobs(pool, args).await?;
+    let projection_rows = claim_and_process(pool, args).await?;
+    Ok(reconstruction_jobs + projection_rows)
+}
+
+async fn claim_and_process_reconstruction_jobs(pool: &PgPool, args: &Args) -> Result<usize> {
+    let mut tx = pool.begin().await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, tenant_id, parcel_id, time_slice_jsonb, requested_by,
+               auto_approve, attempt_count
+        FROM reconstruction_jobs
+        WHERE status = 'pending'
+          AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+        ORDER BY created_at ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT $1
+        "#,
+    )
+    .bind(args.reconstruction_job_batch_size as i64)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    if rows.is_empty() {
+        tx.rollback().await.ok();
+        return Ok(0);
+    }
+
+    let ids: Vec<Uuid> = rows.iter().map(|row| row.get::<Uuid, _>("id")).collect();
+    sqlx::query(
+        r#"
+        UPDATE reconstruction_jobs
+        SET status = 'running', updated_at = now()
+        WHERE id = ANY($1)
+        "#,
+    )
+    .bind(&ids[..])
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let mut handled = 0_usize;
+    for row in rows {
+        let time_slice_json: Value = row
+            .try_get::<Json<Value>, _>("time_slice_jsonb")
+            .map(|json| json.0)
+            .unwrap_or(Value::Null);
+        let time_slice = decode_time_slice(time_slice_json);
+        let job = ReconstructionJobRow {
+            id: row.get("id"),
+            tenant_id: row.get("tenant_id"),
+            parcel_id: row.get("parcel_id"),
+            time_slice,
+            requested_by: row.get("requested_by"),
+            auto_approve: row.get("auto_approve"),
+            attempt_count: row.get("attempt_count"),
+        };
+
+        debug!(
+            job_id = %job.id,
+            tenant_id = %job.tenant_id,
+            parcel_id = %job.parcel_id,
+            auto_approve = job.auto_approve,
+            "claimed procedural reconstruction job"
+        );
+
+        let outcome = process_reconstruction_job(pool, args, &job).await;
+        if let Err(error) =
+            mark_reconstruction_job_outcome(pool, job.id, job.attempt_count, outcome, args).await
+        {
+            error!(job_id = %job.id, %error, "failed to mark reconstruction job outcome");
+        }
+        handled += 1;
+    }
+    Ok(handled)
+}
+
+async fn process_reconstruction_job(
+    pool: &PgPool,
+    args: &Args,
+    job: &ReconstructionJobRow,
+) -> Result<ProcessedReconstruction, ProjectionError> {
+    let tenant_slug = resolve_tenant_slug(pool, job.tenant_id)
+        .await
+        .map_err(|error| ProjectionError::Transient(format!("tenant lookup: {error}")))?;
+    if args.theseus_bridge_url.trim().is_empty() {
+        let provider = ZeroEmbeddingProvider::default();
+        run_reconstruction_with_provider(pool, args, job, &tenant_slug, &provider).await
+    } else {
+        let provider = TheseusBatchEmbeddingProvider::new(args.theseus_bridge_url.clone());
+        run_reconstruction_with_provider(pool, args, job, &tenant_slug, &provider).await
+    }
+}
+
+async fn run_reconstruction_with_provider<E>(
+    pool: &PgPool,
+    args: &Args,
+    job: &ReconstructionJobRow,
+    tenant_slug: &str,
+    embedding_provider: &E,
+) -> Result<ProcessedReconstruction, ProjectionError>
+where
+    E: civic_atlas_reconstruction_engine::EmbeddingProvider,
+{
+    let request = ReconstructionRequest {
+        tenant_context: TenantContext {
+            tenant_id: tenant_slug.to_string(),
+            atlas_node_id: format!("atlas:{tenant_slug}"),
+            metadata: Default::default(),
+        },
+        parcel_id: job.parcel_id.clone(),
+        time_slice: job.time_slice,
+        requested_by: job.requested_by.clone(),
+        auto_approve: job.auto_approve,
+    };
+    let repository = PostgisRepository::new(pool.clone());
+    let model = PairformerCivicPriorModel::default();
+    let generator = SceneFoundryManifestGenerator::new(args.scene_foundry_uri_prefix.clone());
+    let output = run_full_pipeline(request, &repository, embedding_provider, &model, &generator)
+        .await
+        .map_err(|error| ProjectionError::Transient(format!("pipeline: {error}")))?;
+    persist_reconstruction_output(pool, job, tenant_slug, output)
+        .await
+        .map_err(|error| ProjectionError::Transient(format!("persist: {error}")))
+}
+
+async fn persist_reconstruction_output(
+    pool: &PgPool,
+    job: &ReconstructionJobRow,
+    tenant_slug: &str,
+    output: PipelineOutput,
+) -> Result<ProcessedReconstruction> {
+    let mut spec = output.merged.spec.clone();
+    attach_manifest_to_spec(&mut spec, &output.asset_manifest);
+    spec.tenant_context = Some(TenantContext {
+        tenant_id: tenant_slug.to_string(),
+        atlas_node_id: format!("atlas:{tenant_slug}"),
+        metadata: Default::default(),
+    });
+    spec.status = if job.auto_approve {
+        ReconstructionSpecStatus::Approved as i32
+    } else {
+        ReconstructionSpecStatus::InReview as i32
+    };
+    if job.auto_approve {
+        spec.reviewed_by = "procedural-reconstruction-engine".to_string();
+    }
+    if spec.created_by.trim().is_empty() {
+        spec.created_by = job.requested_by.clone();
+    }
+
+    let spec_json = reconstruction_spec_to_json(&spec);
+    let building_id = optional_uuid(&spec.building_id)?;
+    let mut tx = pool.begin().await?;
+    set_tx_tenant(&mut tx, job.tenant_id).await?;
+    let parcel_id = resolve_optional_parcel_uuid(&mut tx, job.tenant_id, &spec.parcel_id).await?;
+    let result = sqlx::query(
+        r#"
+        INSERT INTO reconstruction_specs (
+          tenant_id, spec_id, version, status, building_id, parcel_id,
+          civic_object_id, block_id, title, supersedes_spec_id, spec_jsonb,
+          created_by, reviewed_by, approved_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), $9, NULLIF($10, ''),
+                $11, $12, NULLIF($13, ''), CASE WHEN $4 = 'approved' THEN now() ELSE NULL END, now())
+        ON CONFLICT (tenant_id, spec_id, version) DO UPDATE
+        SET status = EXCLUDED.status,
+            building_id = EXCLUDED.building_id,
+            parcel_id = EXCLUDED.parcel_id,
+            civic_object_id = EXCLUDED.civic_object_id,
+            block_id = EXCLUDED.block_id,
+            title = EXCLUDED.title,
+            supersedes_spec_id = EXCLUDED.supersedes_spec_id,
+            spec_jsonb = EXCLUDED.spec_jsonb,
+            created_by = EXCLUDED.created_by,
+            reviewed_by = EXCLUDED.reviewed_by,
+            approved_at = EXCLUDED.approved_at,
+            updated_at = now()
+        WHERE reconstruction_specs.status <> 'approved'
+        "#,
+    )
+    .bind(job.tenant_id)
+    .bind(&spec.spec_id)
+    .bind(spec.version as i32)
+    .bind(spec_status_sql(spec.status))
+    .bind(building_id)
+    .bind(parcel_id)
+    .bind(&spec.civic_object_id)
+    .bind(&spec.block_id)
+    .bind(&spec.title)
+    .bind(&spec.supersedes_spec_id)
+    .bind(Json(&spec_json))
+    .bind(&spec.created_by)
+    .bind(&spec.reviewed_by)
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(anyhow!("approved reconstruction specs are immutable"));
+    }
+
+    for asset in &spec.assets {
+        sqlx::query(
+            r#"
+            INSERT INTO generated_assets (
+              tenant_id, asset_id, spec_id, spec_version, asset_type, uri,
+              content_hash, metadata_jsonb
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8)
+            ON CONFLICT (tenant_id, asset_id) DO UPDATE
+            SET asset_type = EXCLUDED.asset_type,
+                uri = EXCLUDED.uri,
+                content_hash = EXCLUDED.content_hash,
+                metadata_jsonb = EXCLUDED.metadata_jsonb
+            "#,
+        )
+        .bind(job.tenant_id)
+        .bind(&asset.asset_id)
+        .bind(&asset.spec_id)
+        .bind(asset.spec_version as i32)
+        .bind(&asset.asset_type)
+        .bind(&asset.uri)
+        .bind(&asset.content_hash)
+        .bind(Json(json!(asset.metadata)))
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if job.auto_approve {
+        let building_id = building_id
+            .ok_or_else(|| anyhow!("auto-approved reconstruction requires a UUID building_id"))?;
+        for part in reconstruction_part_records(&spec) {
+            sqlx::query(
+                r#"
+                INSERT INTO building_parts (
+                  tenant_id, building_id, part_key, part_type, payload_jsonb,
+                  confidence, source_ids, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+                ON CONFLICT (tenant_id, building_id, part_key) DO UPDATE
+                SET part_type = EXCLUDED.part_type,
+                    payload_jsonb = EXCLUDED.payload_jsonb,
+                    confidence = EXCLUDED.confidence,
+                    source_ids = EXCLUDED.source_ids,
+                    updated_at = now()
+                "#,
+            )
+            .bind(job.tenant_id)
+            .bind(building_id)
+            .bind(&part.key)
+            .bind(&part.part_type)
+            .bind(Json(&part.payload))
+            .bind(part.confidence)
+            .bind(&part.source_ids)
+            .execute(&mut *tx)
+            .await?;
+        }
+        enqueue_building_presence_projection(&mut tx, job.tenant_id, &spec).await?;
+    }
+
+    tx.commit().await?;
+
+    let stage_report = json!({
+        "evidence": {
+            "directCount": output.evidence.direct.len(),
+            "adjacentCount": output.evidence.adjacent.len(),
+            "hasTemporalPredecessor": output.evidence.temporal_predecessor.is_some(),
+            "hasTemporalSuccessor": output.evidence.temporal_successor.is_some()
+        },
+        "directExtraction": {
+            "populatedFields": output.direct.populated_fields
+        },
+        "blockSubgraph": {
+            "nodeCount": output.block_subgraph.nodes.len(),
+            "edgeCount": output.block_subgraph.edges.len(),
+            "focusNode": output.block_subgraph.focus_node
+        },
+        "embeddings": {
+            "model": output.embedded_subgraph.embedding_model,
+            "modelVersion": output.embedded_subgraph.embedding_model_version,
+            "missingCount": output.embedded_subgraph.nodes.iter().filter(|node| node.missing_embedding).count()
+        },
+        "prior": {
+            "modelVersion": output.prior.model_version,
+            "edgeConfidences": output.prior.edge_confidences
+        },
+        "merge": {
+            "conflicts": output.merged.conflicts
+        },
+        "assets": output.asset_manifest
+    });
+
+    Ok(ProcessedReconstruction {
+        spec_id: spec.spec_id,
+        spec_version: spec.version,
+        stage_report,
+    })
+}
+
+async fn enqueue_building_presence_projection(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    spec: &ReconstructionSpec,
+) -> Result<()> {
+    let idempotency_key = format!(
+        "procedural-reconstruction:building-presence:{tenant_id}:{}:{}",
+        spec.spec_id, spec.version
+    );
+    let payload = json!({
+        "projectionKind": "BuildingPresence",
+        "specId": spec.spec_id,
+        "version": spec.version,
+        "buildingId": spec.building_id,
+        "civicObjectId": spec.civic_object_id,
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO reconstruction_projection_outbox (
+          tenant_id, spec_id, spec_version, projection_kind, idempotency_key,
+          payload_jsonb, status
+        )
+        VALUES ($1, $2, $3, 'BuildingPresence', $4, $5, 'pending')
+        ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(&spec.spec_id)
+    .bind(spec.version as i32)
+    .bind(idempotency_key)
+    .bind(Json(payload))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 async fn claim_and_process(pool: &PgPool, args: &Args) -> Result<usize> {
@@ -220,17 +605,16 @@ async fn dispatch_projection(
     payload: &Value,
 ) -> Result<(), ProjectionError> {
     match projection_kind {
-        "BuildingPresence" => project_building_presence(args, payload).await,
+        "BuildingPresence" | "rustyred_building_presence" => {
+            project_building_presence(args, payload).await
+        }
         other => Err(ProjectionError::Permanent(format!(
             "unknown projection_kind: {other}"
         ))),
     }
 }
 
-async fn project_building_presence(
-    args: &Args,
-    payload: &Value,
-) -> Result<(), ProjectionError> {
+async fn project_building_presence(args: &Args, payload: &Value) -> Result<(), ProjectionError> {
     let parsed: BuildingPresencePayload = serde_json::from_value(payload.clone())
         .map_err(|e| ProjectionError::Permanent(format!("payload decode: {e}")))?;
 
@@ -335,7 +719,8 @@ async fn mark_outcome(
                 .execute(&mut *tx)
                 .await?;
             } else {
-                let backoff_seconds = backoff_for_attempt(args.backoff_base_secs, next_attempt_count);
+                let backoff_seconds =
+                    backoff_for_attempt(args.backoff_base_secs, next_attempt_count);
                 debug!(
                     outbox_id = %id,
                     %msg,
@@ -365,6 +750,174 @@ async fn mark_outcome(
     }
     tx.commit().await?;
     Ok(())
+}
+
+async fn mark_reconstruction_job_outcome(
+    pool: &PgPool,
+    id: Uuid,
+    attempt_count: i32,
+    outcome: Result<ProcessedReconstruction, ProjectionError>,
+    args: &Args,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    match outcome {
+        Ok(processed) => {
+            sqlx::query(
+                r#"
+                UPDATE reconstruction_jobs
+                SET status = 'succeeded',
+                    attempt_count = attempt_count + 1,
+                    resulting_spec_id = $2,
+                    resulting_spec_version = $3,
+                    stage_report_jsonb = $4,
+                    last_error = NULL,
+                    updated_at = now(),
+                    next_attempt_at = NULL
+                WHERE id = $1
+                "#,
+            )
+            .bind(id)
+            .bind(&processed.spec_id)
+            .bind(processed.spec_version as i32)
+            .bind(Json(processed.stage_report))
+            .execute(&mut *tx)
+            .await?;
+        }
+        Err(ProjectionError::Permanent(msg)) => {
+            sqlx::query(
+                r#"
+                UPDATE reconstruction_jobs
+                SET status = 'failed',
+                    attempt_count = attempt_count + 1,
+                    last_error = $2,
+                    updated_at = now(),
+                    next_attempt_at = NULL
+                WHERE id = $1
+                "#,
+            )
+            .bind(id)
+            .bind(&msg)
+            .execute(&mut *tx)
+            .await?;
+        }
+        Err(ProjectionError::Transient(msg)) => {
+            let next_attempt_count = attempt_count + 1;
+            if next_attempt_count >= args.max_attempts {
+                sqlx::query(
+                    r#"
+                    UPDATE reconstruction_jobs
+                    SET status = 'failed',
+                        attempt_count = $2,
+                        last_error = $3,
+                        updated_at = now(),
+                        next_attempt_at = NULL
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(id)
+                .bind(next_attempt_count)
+                .bind(&msg)
+                .execute(&mut *tx)
+                .await?;
+            } else {
+                let backoff_seconds =
+                    backoff_for_attempt(args.backoff_base_secs, next_attempt_count);
+                sqlx::query(
+                    r#"
+                    UPDATE reconstruction_jobs
+                    SET status = 'pending',
+                        attempt_count = $2,
+                        last_error = $3,
+                        updated_at = now(),
+                        next_attempt_at = now() + ($4::bigint || ' seconds')::interval
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(id)
+                .bind(next_attempt_count)
+                .bind(&msg)
+                .bind(backoff_seconds)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn resolve_tenant_slug(pool: &PgPool, tenant_id: Uuid) -> Result<String> {
+    let slug: Option<String> = sqlx::query_scalar("SELECT slug FROM tenants WHERE id = $1")
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await?;
+    slug.ok_or_else(|| anyhow!("tenant not found: {tenant_id}"))
+}
+
+fn decode_time_slice(value: Value) -> TimeSlice {
+    let decoded: TimeSlicePayload = serde_json::from_value(value).unwrap_or_default();
+    TimeSlice {
+        at_ms: decoded.at_ms,
+        start_ms: decoded.start_ms,
+        end_ms: decoded.end_ms,
+    }
+}
+
+fn optional_uuid(value: &str) -> Result<Option<Uuid>> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse()
+        .map(Some)
+        .with_context(|| format!("invalid UUID value: {value}"))
+}
+
+async fn resolve_optional_parcel_uuid(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    parcel_ref: &str,
+) -> Result<Option<Uuid>> {
+    let parcel_ref = parcel_ref.trim();
+    if parcel_ref.is_empty() {
+        return Ok(None);
+    }
+    let parsed_uuid = parcel_ref.parse::<Uuid>().ok();
+    let parcel_id: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM parcels
+        WHERE tenant_id = $1
+          AND (($2::uuid IS NOT NULL AND id = $2) OR parcel_key = $3)
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(parsed_uuid)
+    .bind(parcel_ref)
+    .fetch_optional(&mut **tx)
+    .await?;
+    parcel_id
+        .map(Some)
+        .ok_or_else(|| anyhow!("parcel not found for reconstruction parcel_ref: {parcel_ref}"))
+}
+
+async fn set_tx_tenant(tx: &mut Transaction<'_, Postgres>, tenant_id: Uuid) -> Result<()> {
+    sqlx::query("SELECT set_config('app.tenant_id', $1, true)")
+        .bind(tenant_id.to_string())
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+fn spec_status_sql(status: i32) -> &'static str {
+    match ReconstructionSpecStatus::try_from(status).ok() {
+        Some(ReconstructionSpecStatus::InReview) => "in_review",
+        Some(ReconstructionSpecStatus::Approved) => "approved",
+        Some(ReconstructionSpecStatus::Superseded) => "superseded",
+        Some(ReconstructionSpecStatus::Rejected) => "rejected",
+        _ => "draft",
+    }
 }
 
 fn backoff_for_attempt(base_secs: i64, attempt: i32) -> i64 {

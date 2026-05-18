@@ -21,6 +21,8 @@ fn reconstruction_spec_round_trips_part_provenance() {
         confidence: 0.82,
         from_gnn_prior: true,
         reviewer_note: "Opening rhythm inferred from a checked source.".to_string(),
+        coverage_quality: 0.76,
+        gnn_version: "civic-pairformer/test".to_string(),
     };
 
     let spec = ReconstructionSpec {
@@ -75,6 +77,8 @@ fn reconstruction_spec_round_trips_part_provenance() {
 
     assert_eq!(decoded_mass_provenance.confidence, 0.82);
     assert!(decoded_mass_provenance.from_gnn_prior);
+    assert_eq!(decoded_mass_provenance.coverage_quality, 0.76);
+    assert_eq!(decoded_mass_provenance.gnn_version, "civic-pairformer/test");
     assert_eq!(decoded_mass_provenance.sources.len(), 1);
     assert_eq!(
         decoded_mass_provenance.sources[0].source_id,

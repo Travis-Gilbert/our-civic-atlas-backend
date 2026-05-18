@@ -21,12 +21,23 @@ Theseus bridge clients.
 - `proto/theseus_bridge/v1/bridge.proto` defines the Theseus bridge boundary.
 - `crates/civic-atlas-server` exposes tonic gRPC plus a Connect-style JSON
   shim for the first migrated `placesList` resolver.
+- `crates/civic-atlas-reconstruction-engine` implements the eight-stage
+  procedural reconstruction algorithm as typed, independently testable stages:
+  evidence assembly, direct extraction, block subgraph construction, spacetime
+  embedding hydration, Pairformer-ready prior inference, merge, asset manifest
+  generation, and persistence handoff.
+- `crates/civic-atlas-outbox-worker` drains both reconstruction projection
+  intents and `reconstruction_jobs` pipeline requests. Pipeline jobs write
+  generated ReconstructionSpecs back to PostGIS and can auto-approve into
+  part-level `building_parts` plus replayable RustyRed projection intents.
 - `apps/graphql-server` keeps GraphQL browser semantics unchanged.
 - `migrations/0001_tenants_rls.sql` creates tenant tables and row-level
   security defaults.
 - `migrations/0002_reconstruction_truth_schema.sql` creates the
   reconstruction truth schema, part-level confidence indexes, generated asset
   tables, corrections, and the projection outbox.
+- `migrations/0006_reconstruction_pipeline_jobs.sql` creates the tenant-scoped
+  queue for running the procedural reconstruction algorithm.
 - `crates/civic-atlas-cli` provisions tenant rows and runtime namespace rows in
   one transaction, validates ReconstructionSpec JSON, and submits specs for
   review.
@@ -67,3 +78,7 @@ cargo run -p civic-atlas-cli -- spec submit path/to/spec.json
   `placesList` migration path.
 - `CIVIC_ATLAS_DEFAULT_TENANT`: default fixture tenant, default `flint`.
 - `THESEUS_BRIDGE_URL`: gRPC URL for the Theseus bridge process.
+- `RECONSTRUCTION_JOB_BATCH_SIZE`: worker batch size for procedural
+  reconstruction jobs, default `4`.
+- `SCENE_FOUNDRY_URI_PREFIX`: asset manifest URI prefix while the Blender/Modal
+  renderer is queued or stubbed, default `scene-foundry://queued`.

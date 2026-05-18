@@ -253,6 +253,7 @@ name = "civic-atlas-outbox-worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "civic-atlas-reconstruction-engine",
  "civic-atlas-types",
  "clap",
  "serde",
@@ -262,6 +263,22 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "civic-atlas-reconstruction-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "civic-atlas-types",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "theseus-client",
+ "tokio",
+ "tonic",
  "uuid",
 ]
 
