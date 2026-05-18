@@ -1,0 +1,11 @@
+[package]
+name = "theseus-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+civic-atlas-types = { path = "../civic-atlas-types" }
+tonic.workspace = true
+

@@ -1,0 +1,90 @@
+syntax = "proto3";
+
+package civic_atlas.v1;
+
+message TenantContext {
+  string tenant_id = 1;
+  string atlas_node_id = 2;
+  map<string, string> metadata = 3;
+}
+
+message CivicObject {
+  string id = 1;
+  string tenant_id = 2;
+  string name = 3;
+  string object_type = 4;
+  string geometry_json = 5;
+  optional int64 time_start_ms = 6;
+  optional int64 time_end_ms = 7;
+  double confidence = 8;
+  repeated string source_ids = 9;
+  string dossier_path = 10;
+  map<string, string> attributes = 11;
+}
+
+message GetPlaceRequest {
+  TenantContext tenant_context = 1;
+  string place_id = 2;
+}
+
+message GetPlaceResponse {
+  CivicObject place = 1;
+}
+
+message ListPlacesRequest {
+  TenantContext tenant_context = 1;
+  uint32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListPlacesResponse {
+  repeated CivicObject places = 1;
+  string next_page_token = 2;
+}
+
+message GetNodeRequest {
+  TenantContext tenant_context = 1;
+  string node_id = 2;
+}
+
+message GetNodeResponse {
+  CivicObject node = 1;
+}
+
+message GetDossierRequest {
+  TenantContext tenant_context = 1;
+  string object_id = 2;
+}
+
+message GetDossierResponse {
+  string dossier_json = 1;
+}
+
+message ResolveTenantRequest {
+  string slug = 1;
+}
+
+message ResolveTenantResponse {
+  TenantContext tenant_context = 1;
+  string display_name = 2;
+}
+
+message HealthRequest {
+  TenantContext tenant_context = 1;
+}
+
+message HealthResponse {
+  string status = 1;
+  string service = 2;
+  string tenant_id = 3;
+}
+
+service CivicAtlasService {
+  rpc GetPlace(GetPlaceRequest) returns (GetPlaceResponse);
+  rpc ListPlaces(ListPlacesRequest) returns (ListPlacesResponse);
+  rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+  rpc GetDossier(GetDossierRequest) returns (GetDossierResponse);
+  rpc ResolveTenant(ResolveTenantRequest) returns (ResolveTenantResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+

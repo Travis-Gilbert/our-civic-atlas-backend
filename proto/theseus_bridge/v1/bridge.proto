@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package theseus_bridge.v1;
+
+import "civic_atlas/v1/civic_atlas.proto";
+
+message SpacetimeTopicRequest {
+  civic_atlas.v1.TenantContext tenant_context = 1;
+  string topic = 2;
+  uint32 limit = 3;
+}
+
+message SpacetimeTopicChunk {
+  string node_id = 1;
+  string title = 2;
+  string summary = 3;
+  double score = 4;
+  repeated float embedding = 5;
+}
+
+message SpacetimeEmbeddingRequest {
+  civic_atlas.v1.TenantContext tenant_context = 1;
+  string node_id = 2;
+}
+
+message SpacetimeEmbeddingResponse {
+  string node_id = 1;
+  repeated float embedding = 2;
+  string model = 3;
+}
+
+message SearchObjectsRequest {
+  civic_atlas.v1.TenantContext tenant_context = 1;
+  string query = 2;
+  uint32 limit = 3;
+}
+
+message SearchObjectsResponse {
+  repeated civic_atlas.v1.CivicObject objects = 1;
+}
+
+message IngestArtifactRequest {
+  civic_atlas.v1.TenantContext tenant_context = 1;
+  string artifact_id = 2;
+  string source_uri = 3;
+  string payload_json = 4;
+}
+
+message IngestArtifactResponse {
+  string artifact_id = 1;
+  string status = 2;
+}
+
+service TheseusBridge {
+  rpc ResolveSpacetimeTopic(SpacetimeTopicRequest) returns (stream SpacetimeTopicChunk);
+  rpc GetSpacetimeEmbedding(SpacetimeEmbeddingRequest) returns (SpacetimeEmbeddingResponse);
+  rpc SearchObjects(SearchObjectsRequest) returns (SearchObjectsResponse);
+  rpc IngestArtifact(IngestArtifactRequest) returns (IngestArtifactResponse);
+}
+

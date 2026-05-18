@@ -1,0 +1,20 @@
+{
+  "name": "@our-civic-atlas/graphql-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@graphql-yoga/node": "^3.9.1",
+    "dataloader": "^2.2.3",
+    "graphql": "^16.14.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
+

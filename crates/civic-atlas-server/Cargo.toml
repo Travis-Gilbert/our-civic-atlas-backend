@@ -1,0 +1,21 @@
+[package]
+name = "civic-atlas-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+civic-atlas-types = { path = "../civic-atlas-types" }
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tenant-resolver = { path = "../tenant-resolver" }
+tokio.workspace = true
+tonic.workspace = true
+tonic-web.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+

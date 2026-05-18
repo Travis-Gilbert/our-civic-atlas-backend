@@ -1,0 +1,13 @@
+[package]
+name = "tenant-resolver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+civic-atlas-types = { path = "../civic-atlas-types" }
+http = "1.1"
+thiserror.workspace = true
+tower.workspace = true
+

@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package civic_atlas.v1;
+
+import "civic_atlas/v1/civic_atlas.proto";
+
+message ViewportBounds {
+  double min_lat = 1;
+  double min_lon = 2;
+  double max_lat = 3;
+  double max_lon = 4;
+}
+
+message TimeSlice {
+  optional int64 at_ms = 1;
+  optional int64 start_ms = 2;
+  optional int64 end_ms = 3;
+}
+
+message GetViewportAtTimeRequest {
+  TenantContext tenant_context = 1;
+  ViewportBounds bounds = 2;
+  TimeSlice time = 3;
+  uint32 limit = 4;
+}
+
+message GetViewportAtTimeResponse {
+  repeated CivicObject objects = 1;
+}
+
+message GetBlockSubgraphRequest {
+  TenantContext tenant_context = 1;
+  string block_id = 2;
+  TimeSlice time = 3;
+  uint32 depth = 4;
+}
+
+message GetBlockSubgraphResponse {
+  repeated CivicObject nodes = 1;
+  repeated CivicObject artifact_anchors = 2;
+}
+
+message GetParcelHistoryRequest {
+  TenantContext tenant_context = 1;
+  string parcel_id = 2;
+}
+
+message GetParcelHistoryResponse {
+  repeated CivicObject events = 1;
+}
+
+message GetNearbyArtifactsRequest {
+  TenantContext tenant_context = 1;
+  double lat = 2;
+  double lon = 3;
+  double radius_km = 4;
+  TimeSlice time = 5;
+  uint32 limit = 6;
+}
+
+message GetNearbyArtifactsResponse {
+  repeated CivicObject artifacts = 1;
+}
+
+service SpacetimeAtlasService {
+  rpc GetViewportAtTime(GetViewportAtTimeRequest) returns (GetViewportAtTimeResponse);
+  rpc GetBlockSubgraph(GetBlockSubgraphRequest) returns (GetBlockSubgraphResponse);
+  rpc GetParcelHistory(GetParcelHistoryRequest) returns (GetParcelHistoryResponse);
+  rpc GetNearbyArtifacts(GetNearbyArtifactsRequest) returns (GetNearbyArtifactsResponse);
+}
