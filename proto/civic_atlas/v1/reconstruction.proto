@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package civic_atlas.v1;
+
+import "civic_atlas/v1/civic_atlas.proto";
+
+enum ReconstructionSpecStatus {
+  RECONSTRUCTION_SPEC_STATUS_UNSPECIFIED = 0;
+  RECONSTRUCTION_SPEC_STATUS_DRAFT = 1;
+  RECONSTRUCTION_SPEC_STATUS_IN_REVIEW = 2;
+  RECONSTRUCTION_SPEC_STATUS_APPROVED = 3;
+  RECONSTRUCTION_SPEC_STATUS_SUPERSEDED = 4;
+  RECONSTRUCTION_SPEC_STATUS_REJECTED = 5;
+}
+
+enum ReconstructionSourceType {
+  RECONSTRUCTION_SOURCE_TYPE_UNSPECIFIED = 0;
+  RECONSTRUCTION_SOURCE_TYPE_ARCHIVAL_PHOTO = 1;
+  RECONSTRUCTION_SOURCE_TYPE_MAP = 2;
+  RECONSTRUCTION_SOURCE_TYPE_PERMIT = 3;
+  RECONSTRUCTION_SOURCE_TYPE_SURVEY = 4;
+  RECONSTRUCTION_SOURCE_TYPE_ORAL_HISTORY = 5;
+  RECONSTRUCTION_SOURCE_TYPE_MODEL_PRIOR = 6;
+  RECONSTRUCTION_SOURCE_TYPE_OTHER = 7;
+}
+
+message ReconstructionSource {
+  string source_id = 1;
+  ReconstructionSourceType source_type = 2;
+  string title = 3;
+  string uri = 4;
+  optional int64 captured_at_ms = 5;
+  string citation = 6;
+  map<string, string> metadata = 7;
+}
+
+message PartProvenance {
+  repeated ReconstructionSource sources = 1;
+  double confidence = 2;
+  bool from_gnn_prior = 3;
+  string reviewer_note = 4;
+}
+
+message DimensionRange {
+  optional double min = 1;
+  optional double max = 2;
+  string unit = 3;
+}
+
+message Mass {
+  PartProvenance provenance = 1;
+  string form = 2;
+  uint32 story_count = 3;
+  DimensionRange height = 4;
+  DimensionRange width = 5;
+  DimensionRange depth = 6;
+  map<string, string> attributes = 7;
+}
+
+message OpeningGrid {
+  PartProvenance provenance = 1;
+  uint32 bay_count = 2;
+  uint32 floor_count = 3;
+  string rhythm = 4;
+  string opening_type = 5;
+  map<string, string> attributes = 6;
+}
+
+message Facade {
+  PartProvenance provenance = 1;
+  string orientation = 2;
+  string material = 3;
+  string color = 4;
+  repeated OpeningGrid opening_grids = 5;
+  map<string, string> attributes = 6;
+}
+
+message Roof {
+  PartProvenance provenance = 1;
+  string form = 2;
+  string material = 3;
+  optional double pitch_degrees = 4;
+  map<string, string> attributes = 5;
+}
+
+message Ornament {
+  PartProvenance provenance = 1;
+  string ornament_id = 2;
+  string kind = 3;
+  string location = 4;
+  string material = 5;
+  map<string, string> attributes = 6;
+}
+
+message GroundFloor {
+  PartProvenance provenance = 1;
+  string use_type = 2;
+  string storefront_type = 3;
+  string entry_location = 4;
+  bool has_awning = 5;
+  map<string, string> attributes = 6;
+}
+
+message ReconstructionAsset {
+  string asset_id = 1;
+  string spec_id = 2;
+  uint32 spec_version = 3;
+  string tenant_id = 4;
+  string asset_type = 5;
+  string uri = 6;
+  string content_hash = 7;
+  map<string, string> metadata = 8;
+}
+
+message ReconstructionSpec {
+  TenantContext tenant_context = 1;
+  string spec_id = 2;
+  string civic_object_id = 3;
+  string building_id = 4;
+  string parcel_id = 5;
+  string block_id = 6;
+  string title = 7;
+  ReconstructionSpecStatus status = 8;
+  uint32 version = 9;
+  string supersedes_spec_id = 10;
+  optional int64 created_at_ms = 11;
+  optional int64 updated_at_ms = 12;
+  string created_by = 13;
+  string reviewed_by = 14;
+  Mass mass = 15;
+  repeated Facade facades = 16;
+  Roof roof = 17;
+  repeated Ornament ornaments = 18;
+  GroundFloor ground_floor = 19;
+  repeated ReconstructionAsset assets = 20;
+  map<string, string> metadata = 21;
+}

@@ -46,9 +46,9 @@ lower-level composition of H3 space and node time intervals.
 | OCA-BE-P1-001 | Extend RustyRed `GraphStore` with node intervals. | `theseus_native/crates/thg-core` | execute | Standard `t_start_ms` and `t_end_ms` properties parse consistently. | cargo tests | Time leaks into H3 index. | partial |
 | OCA-BE-P1-002 | Add `thg-geotemporal` crate. | `theseus_native/crates/thg-geotemporal` | execute | Tenant-scoped query composes H3 spatial result with node intervals. | cargo tests | Cross-tenant spatial leakage. | partial |
 | OCA-BE-P1-003 | Add Civic Atlas `spacetime-atlas` endpoint/service implementation. | backend proto/server | execute | `proto/civic_atlas/v1/spacetime_atlas.proto` exposes `SpacetimeAtlasService` with `GetViewportAtTime`, `GetBlockSubgraph`, `GetParcelHistory`, and `GetNearbyArtifacts`; implementation composes RustyRed traversal. | integration tests | Query shape diverges from frontend needs. | partial |
-| OCA-BE-P2-001 | Add ReconstructionSpec proto and generated type gates. | backend proto + TS/Python generation | execute | Rust, TypeScript, and Python generated outputs fail CI when stale. | schema drift check | Spec versions diverge. | planned |
-| OCA-BE-P2-002 | Add PostGIS reconstruction truth schema. | migrations | execute | Immutable approved specs, building parts, artifacts, anchors, generated assets, corrections, and RLS exist. | migration tests | RustyRed originates truth. | planned |
-| OCA-BE-P2-003 | Implement approval projection job. | backend jobs | execute | Approved spec writes PostGIS parts first, then idempotently projects summary to RustyRed. | replay tests | Partial projection corrupts graph state. | planned |
+| OCA-BE-P2-001 | Add ReconstructionSpec proto and generated type gates. | backend proto + TS/Python generation | execute | Rust proto generation includes ReconstructionSpec and ReconstructionService; checked-in TypeScript (`ts-proto`) and Python (`grpcio-tools`) artifacts regenerate cleanly and stale output fails CI. | `cargo test --workspace`, `npm run proto:check`, `npm run proto:shape` | Spec versions diverge. | done |
+| OCA-BE-P2-002 | Add PostGIS reconstruction truth schema. | migrations | execute | Immutable approved specs, building parts, artifacts, anchors, generated assets, corrections, and RLS exist. | migration tests | RustyRed originates truth. | done |
+| OCA-BE-P2-003 | Implement approval projection job. | backend jobs | execute | Approved spec writes PostGIS parts first, then idempotently projects summary to RustyRed. | replay tests | Partial projection corrupts graph state. | partial |
 | OCA-BE-P3-001 | Create Blender primitive library repo. | new repo | execute | Eight parameterized archetypes exist and are addressed by spec fields. | asset metadata validation | Assets become hand-authored one-offs. | planned |
 | OCA-BE-P3-002 | Add Modal Scene Foundry renderer. | Modal app | execute | `render_spec_to_glb` uploads deterministic GLB asset path by tenant/spec/version/hash. | Modal smoke | Asset generation lacks replayability. | planned |
 | OCA-BE-P3-003 | Add Carriage Town frontend route. | public atlas route | execute | Route fetches 20 specs through GraphQL and renders GLBs over MapLibre/deck.gl with per-part confidence. | browser screenshots | R3F replaces the map base. | planned |
@@ -79,6 +79,38 @@ Latest validation after the `spacetime-atlas` endpoint rename:
 
 Known validation note: frontend `npm run lint` exits successfully but reports
 the existing unused `SimpleMeshLayer` warning in `AtlasMap.tsx`.
+
+## Phase 2 Orchestrate Report
+
+| Requirement | Evidence |
+|---|---|
+| Schema drift check | `npm run proto:check` regenerates checked-in TypeScript and Python proto output, imports the Python modules, and fails on stale generated diffs. `npm run proto:shape` validates the ReconstructionSpec and ReconstructionService contract shape. |
+| Rust/proto round trip | `cargo test --workspace` passes, including `reconstruction_spec_round_trips_part_provenance`. |
+| PostGIS truth schema | `migrations/0002_reconstruction_truth_schema.sql` creates `building_parts`, `artifacts`, `artifact_anchors`, `reconstruction_specs`, `generated_assets`, `corrections`, and `reconstruction_projection_outbox`. Static migration tests pass. |
+| Multi-tenancy probe | Every new Phase 2 table has `tenant_id`, RLS enabled, and a `current_setting('app.tenant_id', true)` policy asserted by `reconstruction_truth_schema.rs`. |
+| Approval ordering | `ReconstructionService.ApproveSpec` writes part-level `building_parts`, updates the spec to approved, then inserts an idempotent projection outbox intent in the same transaction. |
+| CLI | `civic-atlas spec validate <file>` validates tenant/spec/version and part-level confidence. `civic-atlas spec submit <file>` writes an in-review spec into PostGIS. |
+
+Validation evidence from this slice:
+
+| Check | Result |
+|---|---|
+| `npm run proto:check` | passed |
+| `npm run proto:shape` | passed |
+| `npm run typecheck` | passed |
+| `cargo fmt --all --check` | passed |
+| `cargo test --workspace` | passed |
+| `cargo clippy --locked -p civic-atlas-cli -- -D warnings` | passed |
+| `cargo clippy --locked -p civic-atlas-server -- -D warnings` | passed after containing the tonic `Status` large-error lint at the reconstruction module boundary. |
+
+Explicit deviations:
+
+| Deviation | Reason | Follow-up |
+|---|---|---|
+| RustyRed projection worker is an outbox intent, not a live RustyRed write. | This repo does not yet include the RustyRed projection client/job runner. The outbox preserves the required replay/idempotency boundary and keeps PostGIS as truth. | Implement the worker that drains `reconstruction_projection_outbox` and writes `BuildingPresence` summaries to RustyRed. |
+| Phase 2 gate data was not loaded into a live PostGIS instance. | No live `DATABASE_URL`/seed DB was provided in this run. | Run migrations, submit/approve the five Carriage Town specs, and capture SQL/gRPC evidence. |
+| `GetBlockSubgraph` does not yet return approved reconstruction parts. | The current spacetime-atlas handler still uses fixture data, not the new reconstruction read model. | Connect `GetBlockSubgraph` to approved PostGIS reconstruction specs and projected RustyRed summaries. |
+| Phase 3 remains blocked. | The Blender primitive repo, real Modal/S3 configuration, and frontend visual route/gate are outside this backend-only slice. | Build the primitive library, Modal renderer, backend render job queue, and frontend route with browser screenshots. |
 
 ## Explicit Non-Goals and Deferrals
 

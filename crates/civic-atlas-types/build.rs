@@ -5,6 +5,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure().compile_protos(
         &[
             "../../proto/civic_atlas/v1/civic_atlas.proto",
+            "../../proto/civic_atlas/v1/reconstruction.proto",
+            "../../proto/civic_atlas/v1/reconstruction_service.proto",
             "../../proto/civic_atlas/v1/spacetime_atlas.proto",
             "../../proto/theseus_bridge/v1/bridge.proto",
         ],
@@ -12,6 +14,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     println!("cargo:rerun-if-changed=../../proto/civic_atlas/v1/civic_atlas.proto");
+    println!("cargo:rerun-if-changed=../../proto/civic_atlas/v1/reconstruction.proto");
+    println!("cargo:rerun-if-changed=../../proto/civic_atlas/v1/reconstruction_service.proto");
     println!("cargo:rerun-if-changed=../../proto/civic_atlas/v1/spacetime_atlas.proto");
     println!("cargo:rerun-if-changed=../../proto/theseus_bridge/v1/bridge.proto");
     Ok(())

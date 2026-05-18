@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package civic_atlas.v1;
+
+import "civic_atlas/v1/civic_atlas.proto";
+import "civic_atlas/v1/reconstruction.proto";
+
+message GetReconstructionSpecRequest {
+  TenantContext tenant_context = 1;
+  string spec_id = 2;
+}
+
+message GetReconstructionSpecResponse {
+  ReconstructionSpec spec = 1;
+}
+
+message ListReconstructionSpecsRequest {
+  TenantContext tenant_context = 1;
+  string civic_object_id = 2;
+  string parcel_id = 3;
+  ReconstructionSpecStatus status = 4;
+  uint32 page_size = 5;
+  string page_token = 6;
+}
+
+message ListReconstructionSpecsResponse {
+  repeated ReconstructionSpec specs = 1;
+  string next_page_token = 2;
+}
+
+message SaveDraftSpecRequest {
+  TenantContext tenant_context = 1;
+  ReconstructionSpec spec = 2;
+}
+
+message SaveDraftSpecResponse {
+  ReconstructionSpec spec = 1;
+}
+
+message SubmitSpecForReviewRequest {
+  TenantContext tenant_context = 1;
+  string spec_id = 2;
+  string submitted_by = 3;
+}
+
+message SubmitSpecForReviewResponse {
+  ReconstructionSpec spec = 1;
+}
+
+message ApproveSpecRequest {
+  TenantContext tenant_context = 1;
+  string spec_id = 2;
+  uint32 version = 3;
+  string approved_by = 4;
+  string reviewer_note = 5;
+}
+
+message ApproveSpecResponse {
+  ReconstructionSpec spec = 1;
+}
+
+message ListAssetsForSpecRequest {
+  TenantContext tenant_context = 1;
+  string spec_id = 2;
+  uint32 version = 3;
+  uint32 page_size = 4;
+  string page_token = 5;
+}
+
+message ListAssetsForSpecResponse {
+  repeated ReconstructionAsset assets = 1;
+  string next_page_token = 2;
+}
+
+service ReconstructionService {
+  rpc GetReconstructionSpec(GetReconstructionSpecRequest) returns (GetReconstructionSpecResponse);
+  rpc ListReconstructionSpecs(ListReconstructionSpecsRequest) returns (ListReconstructionSpecsResponse);
+  rpc SaveDraftSpec(SaveDraftSpecRequest) returns (SaveDraftSpecResponse);
+  rpc SubmitSpecForReview(SubmitSpecForReviewRequest) returns (SubmitSpecForReviewResponse);
+  rpc ApproveSpec(ApproveSpecRequest) returns (ApproveSpecResponse);
+  rpc ListAssetsForSpec(ListAssetsForSpecRequest) returns (ListAssetsForSpecResponse);
+}
