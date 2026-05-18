@@ -4,17 +4,21 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/index.ts",
+    "proto:check": "../../scripts/check-generated-protos.sh",
+    "proto:generate": "../../scripts/generate-protos.sh",
+    "proto:shape": "node scripts/check-reconstruction-proto-types.mjs && python3 ../../scripts/check_reconstruction_proto_types.py",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@bufbuild/protobuf": "^2.12.0",
     "@graphql-yoga/node": "^3.9.1",
     "dataloader": "^2.2.3",
     "graphql": "^16.14.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",
+    "ts-proto": "^2.11.8",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }
 }
-

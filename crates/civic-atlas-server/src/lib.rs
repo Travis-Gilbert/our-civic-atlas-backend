@@ -1,4 +1,5 @@
 pub mod fixture;
+pub mod reconstruction;
 pub mod tenant_db;
 
 use std::{env, net::SocketAddr, sync::Arc};
@@ -16,12 +17,15 @@ use civic_atlas_types::civic_atlas::v1::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use tenant_resolver::require_tenant_context;
 use tonic::{Request, Response, Status};
+use tracing::warn;
 
 #[derive(Clone)]
 pub struct AtlasState {
     places: Arc<Vec<CivicObject>>,
+    db: Option<PgPool>,
 }
 
 impl AtlasState {
@@ -32,8 +36,21 @@ impl AtlasState {
             Ok(path) => fixture::load_places_from_geojson(path, &tenant_id)?,
             Err(_) => fixture::seed_places(&tenant_id),
         };
+        let db = match env::var("DATABASE_URL") {
+            Ok(url) if !url.trim().is_empty() => {
+                match PgPoolOptions::new().max_connections(5).connect_lazy(&url) {
+                    Ok(pool) => Some(pool),
+                    Err(error) => {
+                        warn!(%error, "DATABASE_URL could not initialize; DB-backed methods disabled");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         Ok(Self {
             places: Arc::new(places),
+            db,
         })
     }
 
@@ -43,6 +60,10 @@ impl AtlasState {
             .filter(|place| place.tenant_id == tenant_id)
             .cloned()
             .collect()
+    }
+
+    pub fn db_pool(&self) -> Option<&PgPool> {
+        self.db.as_ref()
     }
 }
 
@@ -501,6 +522,7 @@ mod tests {
     fn fixture_seed_is_tenant_scoped() {
         let state = AtlasState {
             places: Arc::new(fixture::seed_places("flint")),
+            db: None,
         };
 
         assert_eq!(state.places_for_tenant("flint").len(), 3);
