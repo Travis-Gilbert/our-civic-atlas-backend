@@ -1,12 +1,13 @@
 [build]
-builder = "RAILPACK"
-buildCommand = "cargo build --release --bin civic-atlas-server"
+# Use the repo's Dockerfile explicitly. Railpack auto-detection
+# failed because the Cargo workspace ships 3 binaries and Railpack's
+# default runtime image did not preserve target/release/. The
+# Dockerfile is a 2-stage build that ends with the single
+# civic-atlas-server binary on a slim Debian base.
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
-# Path inside the build image. Railpack's Rust template places release
-# artifacts under ./target/release/.
-startCommand = "./target/release/civic-atlas-server"
-
 # Probe the Axum health route. The server binds HTTP to 0.0.0.0:$PORT
 # (per main.rs PORT fallback), so Railway's healthchecker hits /healthz
 # on the platform's allocated port automatically.
