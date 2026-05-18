@@ -67,6 +67,30 @@ impl AtlasState {
     pub fn db_pool(&self) -> Option<&PgPool> {
         self.db.as_ref()
     }
+
+    /// Apply embedded SQL migrations against the live PostGIS pool.
+    ///
+    /// Called once at server startup from `main.rs` after `from_env`.
+    /// No-op when `DATABASE_URL` is unset (the server falls back to
+    /// fixture mode in that case).
+    ///
+    /// Migration files live at `<workspace_root>/migrations/`. They
+    /// are embedded into the binary at compile time by the
+    /// `sqlx::migrate!` macro so the runtime image doesn't need to
+    /// ship the .sql files separately. sqlx tracks applied versions
+    /// in the `_sqlx_migrations` table inside the same database.
+    pub async fn run_migrations(&self) -> anyhow::Result<()> {
+        let Some(pool) = self.db.as_ref() else {
+            tracing::info!(
+                "DATABASE_URL not set; skipping migrations (server runs in fixture mode)",
+            );
+            return Ok(());
+        };
+        tracing::info!("running embedded migrations");
+        sqlx::migrate!("../../migrations").run(pool).await?;
+        tracing::info!("migrations applied");
+        Ok(())
+    }
 }
 
 #[derive(Clone)]

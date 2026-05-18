@@ -24,6 +24,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let state = AtlasState::from_env()?;
+    state.run_migrations().await?;
     // Address resolution order for HTTP:
     //   1. CIVIC_ATLAS_HTTP_ADDR  — explicit "host:port" wins (local dev)
     //   2. PORT (e.g. Railway)    — bind to 0.0.0.0:$PORT so the platform
