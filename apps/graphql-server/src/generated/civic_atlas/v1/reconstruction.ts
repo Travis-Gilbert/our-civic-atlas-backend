@@ -151,11 +151,40 @@ export interface ReconstructionSource_MetadataEntry {
   value: string;
 }
 
+export interface ProvenanceCorrection {
+  correctionId: string;
+  correctionType: string;
+  correctionReasoning: string;
+  correctionApprovedAtMs?: number | undefined;
+}
+
 export interface PartProvenance {
   sources: ReconstructionSource[];
-  confidence: number;
+  partConfidence: number;
   fromGnnPrior: boolean;
-  reviewerNote: string;
+  moderatorNotes: string;
+  /**
+   * Phase 5 extension. 0-1 score indicating how authoritative the
+   * source lanes are for this part (assessor records score high,
+   * OSM-inferred low, footprint-only lowest). Used by Phase 6 training
+   * to weight the loss per record. Defaults to 0 when unset, which
+   * the training pass interprets as "no signal". Hand-authored specs
+   * can leave this empty and let approval flow populate it from the
+   * moderator's evidence rating.
+   */
+  coverageQuality: number;
+  /**
+   * Phase 6 extension. Populated when `from_gnn_prior=true` to record
+   * which model version produced the prior. Empty when the part is
+   * not GNN-derived. Format: `<repo>/<short_sha>` or `v<semver>`
+   * depending on the training artifact's manifest.
+   */
+  gnnVersion: string;
+  perSourceConfidences: number[];
+  moderatorOverridden: boolean;
+  moderatorOverriddenAtMs?: number | undefined;
+  hasSourceConflict: boolean;
+  correction: ProvenanceCorrection | undefined;
 }
 
 export interface DimensionRange {
@@ -164,14 +193,24 @@ export interface DimensionRange {
   unit: string;
 }
 
+export interface TextureProvenance {
+  textureSource: string;
+  loraArchetype: string;
+  loraWeight?: number | undefined;
+  controlnetConditioningSource: string;
+  textureConfidence?: number | undefined;
+}
+
 export interface Mass {
   provenance: PartProvenance | undefined;
   form: string;
-  storyCount: number;
+  stories: number;
   height: DimensionRange | undefined;
   width: DimensionRange | undefined;
   depth: DimensionRange | undefined;
   attributes: { [key: string]: string };
+  partId: string;
+  footprintGeometryId: string;
 }
 
 export interface Mass_AttributesEntry {
@@ -179,13 +218,22 @@ export interface Mass_AttributesEntry {
   value: string;
 }
 
+export interface OpeningOverride {
+  bayIndex: number;
+  overrideKind: string;
+  overridePattern: string;
+  overrideProvenance: PartProvenance | undefined;
+}
+
 export interface OpeningGrid {
   provenance: PartProvenance | undefined;
   bayCount: number;
   floorCount: number;
-  rhythm: string;
-  openingType: string;
+  windowPattern: string;
   attributes: { [key: string]: string };
+  openingOverrides: OpeningOverride[];
+  partId: string;
+  hasStorefrontGround: boolean;
 }
 
 export interface OpeningGrid_AttributesEntry {
@@ -195,11 +243,13 @@ export interface OpeningGrid_AttributesEntry {
 
 export interface Facade {
   provenance: PartProvenance | undefined;
-  orientation: string;
-  material: string;
+  facadeSide: string;
+  primaryMaterial: string;
   color: string;
   openingGrids: OpeningGrid[];
   attributes: { [key: string]: string };
+  partId: string;
+  textureProvenance: TextureProvenance | undefined;
 }
 
 export interface Facade_AttributesEntry {
@@ -209,10 +259,11 @@ export interface Facade_AttributesEntry {
 
 export interface Roof {
   provenance: PartProvenance | undefined;
-  form: string;
-  material: string;
+  roofType: string;
+  roofMaterial: string;
   pitchDegrees?: number | undefined;
   attributes: { [key: string]: string };
+  textureProvenance: TextureProvenance | undefined;
 }
 
 export interface Roof_AttributesEntry {
@@ -223,10 +274,12 @@ export interface Roof_AttributesEntry {
 export interface Ornament {
   provenance: PartProvenance | undefined;
   ornamentId: string;
-  kind: string;
+  ornamentKind: string;
   location: string;
-  material: string;
+  ornamentMaterial: string;
   attributes: { [key: string]: string };
+  ornamentStyle: string;
+  textureProvenance: TextureProvenance | undefined;
 }
 
 export interface Ornament_AttributesEntry {
@@ -239,8 +292,10 @@ export interface GroundFloor {
   useType: string;
   storefrontType: string;
   entryLocation: string;
-  hasAwning: boolean;
+  hasCanopy: boolean;
   attributes: { [key: string]: string };
+  partId: string;
+  textureProvenance: TextureProvenance | undefined;
 }
 
 export interface GroundFloor_AttributesEntry {
@@ -273,7 +328,7 @@ export interface ReconstructionSpec {
   blockId: string;
   title: string;
   status: ReconstructionSpecStatus;
-  version: number;
+  specVersion: number;
   supersedesSpecId: string;
   createdAtMs?: number | undefined;
   updatedAtMs?: number | undefined;
@@ -286,6 +341,12 @@ export interface ReconstructionSpec {
   groundFloor: GroundFloor | undefined;
   assets: ReconstructionAsset[];
   metadata: { [key: string]: string };
+  tStartMs?: number | undefined;
+  tEndMs?: number | undefined;
+  archetypeClassification: string;
+  gnnVersion: string;
+  publishedAtMs?: number | undefined;
+  license: string;
 }
 
 export interface ReconstructionSpec_MetadataEntry {
@@ -562,8 +623,144 @@ export const ReconstructionSource_MetadataEntry: MessageFns<ReconstructionSource
   },
 };
 
+function createBaseProvenanceCorrection(): ProvenanceCorrection {
+  return { correctionId: "", correctionType: "", correctionReasoning: "", correctionApprovedAtMs: undefined };
+}
+
+export const ProvenanceCorrection: MessageFns<ProvenanceCorrection> = {
+  encode(message: ProvenanceCorrection, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.correctionId !== "") {
+      writer.uint32(10).string(message.correctionId);
+    }
+    if (message.correctionType !== "") {
+      writer.uint32(18).string(message.correctionType);
+    }
+    if (message.correctionReasoning !== "") {
+      writer.uint32(26).string(message.correctionReasoning);
+    }
+    if (message.correctionApprovedAtMs !== undefined) {
+      writer.uint32(32).int64(message.correctionApprovedAtMs);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ProvenanceCorrection {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseProvenanceCorrection();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.correctionId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.correctionType = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.correctionReasoning = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.correctionApprovedAtMs = longToNumber(reader.int64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ProvenanceCorrection {
+    return {
+      correctionId: isSet(object.correctionId)
+        ? globalThis.String(object.correctionId)
+        : isSet(object.correction_id)
+        ? globalThis.String(object.correction_id)
+        : "",
+      correctionType: isSet(object.correctionType)
+        ? globalThis.String(object.correctionType)
+        : isSet(object.correction_type)
+        ? globalThis.String(object.correction_type)
+        : "",
+      correctionReasoning: isSet(object.correctionReasoning)
+        ? globalThis.String(object.correctionReasoning)
+        : isSet(object.correction_reasoning)
+        ? globalThis.String(object.correction_reasoning)
+        : "",
+      correctionApprovedAtMs: isSet(object.correctionApprovedAtMs)
+        ? globalThis.Number(object.correctionApprovedAtMs)
+        : isSet(object.correction_approved_at_ms)
+        ? globalThis.Number(object.correction_approved_at_ms)
+        : undefined,
+    };
+  },
+
+  toJSON(message: ProvenanceCorrection): unknown {
+    const obj: any = {};
+    if (message.correctionId !== "") {
+      obj.correctionId = message.correctionId;
+    }
+    if (message.correctionType !== "") {
+      obj.correctionType = message.correctionType;
+    }
+    if (message.correctionReasoning !== "") {
+      obj.correctionReasoning = message.correctionReasoning;
+    }
+    if (message.correctionApprovedAtMs !== undefined) {
+      obj.correctionApprovedAtMs = Math.round(message.correctionApprovedAtMs);
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<ProvenanceCorrection>): ProvenanceCorrection {
+    return ProvenanceCorrection.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<ProvenanceCorrection>): ProvenanceCorrection {
+    const message = createBaseProvenanceCorrection();
+    message.correctionId = object.correctionId ?? "";
+    message.correctionType = object.correctionType ?? "";
+    message.correctionReasoning = object.correctionReasoning ?? "";
+    message.correctionApprovedAtMs = object.correctionApprovedAtMs ?? undefined;
+    return message;
+  },
+};
+
 function createBasePartProvenance(): PartProvenance {
-  return { sources: [], confidence: 0, fromGnnPrior: false, reviewerNote: "" };
+  return {
+    sources: [],
+    partConfidence: 0,
+    fromGnnPrior: false,
+    moderatorNotes: "",
+    coverageQuality: 0,
+    gnnVersion: "",
+    perSourceConfidences: [],
+    moderatorOverridden: false,
+    moderatorOverriddenAtMs: undefined,
+    hasSourceConflict: false,
+    correction: undefined,
+  };
 }
 
 export const PartProvenance: MessageFns<PartProvenance> = {
@@ -571,14 +768,37 @@ export const PartProvenance: MessageFns<PartProvenance> = {
     for (const v of message.sources) {
       ReconstructionSource.encode(v!, writer.uint32(10).fork()).join();
     }
-    if (message.confidence !== 0) {
-      writer.uint32(17).double(message.confidence);
+    if (message.partConfidence !== 0) {
+      writer.uint32(17).double(message.partConfidence);
     }
     if (message.fromGnnPrior !== false) {
       writer.uint32(24).bool(message.fromGnnPrior);
     }
-    if (message.reviewerNote !== "") {
-      writer.uint32(34).string(message.reviewerNote);
+    if (message.moderatorNotes !== "") {
+      writer.uint32(34).string(message.moderatorNotes);
+    }
+    if (message.coverageQuality !== 0) {
+      writer.uint32(41).double(message.coverageQuality);
+    }
+    if (message.gnnVersion !== "") {
+      writer.uint32(50).string(message.gnnVersion);
+    }
+    writer.uint32(58).fork();
+    for (const v of message.perSourceConfidences) {
+      writer.double(v);
+    }
+    writer.join();
+    if (message.moderatorOverridden !== false) {
+      writer.uint32(64).bool(message.moderatorOverridden);
+    }
+    if (message.moderatorOverriddenAtMs !== undefined) {
+      writer.uint32(72).int64(message.moderatorOverriddenAtMs);
+    }
+    if (message.hasSourceConflict !== false) {
+      writer.uint32(80).bool(message.hasSourceConflict);
+    }
+    if (message.correction !== undefined) {
+      ProvenanceCorrection.encode(message.correction, writer.uint32(90).fork()).join();
     }
     return writer;
   },
@@ -603,7 +823,7 @@ export const PartProvenance: MessageFns<PartProvenance> = {
             break;
           }
 
-          message.confidence = reader.double();
+          message.partConfidence = reader.double();
           continue;
         }
         case 3: {
@@ -619,7 +839,73 @@ export const PartProvenance: MessageFns<PartProvenance> = {
             break;
           }
 
-          message.reviewerNote = reader.string();
+          message.moderatorNotes = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 41) {
+            break;
+          }
+
+          message.coverageQuality = reader.double();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.gnnVersion = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag === 57) {
+            message.perSourceConfidences.push(reader.double());
+
+            continue;
+          }
+
+          if (tag === 58) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.perSourceConfidences.push(reader.double());
+            }
+
+            continue;
+          }
+
+          break;
+        }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.moderatorOverridden = reader.bool();
+          continue;
+        }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.moderatorOverriddenAtMs = longToNumber(reader.int64());
+          continue;
+        }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.hasSourceConflict = reader.bool();
+          continue;
+        }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.correction = ProvenanceCorrection.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -636,17 +922,52 @@ export const PartProvenance: MessageFns<PartProvenance> = {
       sources: globalThis.Array.isArray(object?.sources)
         ? object.sources.map((e: any) => ReconstructionSource.fromJSON(e))
         : [],
-      confidence: isSet(object.confidence) ? globalThis.Number(object.confidence) : 0,
+      partConfidence: isSet(object.partConfidence)
+        ? globalThis.Number(object.partConfidence)
+        : isSet(object.part_confidence)
+        ? globalThis.Number(object.part_confidence)
+        : 0,
       fromGnnPrior: isSet(object.fromGnnPrior)
         ? globalThis.Boolean(object.fromGnnPrior)
         : isSet(object.from_gnn_prior)
         ? globalThis.Boolean(object.from_gnn_prior)
         : false,
-      reviewerNote: isSet(object.reviewerNote)
-        ? globalThis.String(object.reviewerNote)
-        : isSet(object.reviewer_note)
-        ? globalThis.String(object.reviewer_note)
+      moderatorNotes: isSet(object.moderatorNotes)
+        ? globalThis.String(object.moderatorNotes)
+        : isSet(object.moderator_notes)
+        ? globalThis.String(object.moderator_notes)
         : "",
+      coverageQuality: isSet(object.coverageQuality)
+        ? globalThis.Number(object.coverageQuality)
+        : isSet(object.coverage_quality)
+        ? globalThis.Number(object.coverage_quality)
+        : 0,
+      gnnVersion: isSet(object.gnnVersion)
+        ? globalThis.String(object.gnnVersion)
+        : isSet(object.gnn_version)
+        ? globalThis.String(object.gnn_version)
+        : "",
+      perSourceConfidences: globalThis.Array.isArray(object?.perSourceConfidences)
+        ? object.perSourceConfidences.map((e: any) => globalThis.Number(e))
+        : globalThis.Array.isArray(object?.per_source_confidences)
+        ? object.per_source_confidences.map((e: any) => globalThis.Number(e))
+        : [],
+      moderatorOverridden: isSet(object.moderatorOverridden)
+        ? globalThis.Boolean(object.moderatorOverridden)
+        : isSet(object.moderator_overridden)
+        ? globalThis.Boolean(object.moderator_overridden)
+        : false,
+      moderatorOverriddenAtMs: isSet(object.moderatorOverriddenAtMs)
+        ? globalThis.Number(object.moderatorOverriddenAtMs)
+        : isSet(object.moderator_overridden_at_ms)
+        ? globalThis.Number(object.moderator_overridden_at_ms)
+        : undefined,
+      hasSourceConflict: isSet(object.hasSourceConflict)
+        ? globalThis.Boolean(object.hasSourceConflict)
+        : isSet(object.has_source_conflict)
+        ? globalThis.Boolean(object.has_source_conflict)
+        : false,
+      correction: isSet(object.correction) ? ProvenanceCorrection.fromJSON(object.correction) : undefined,
     };
   },
 
@@ -655,14 +976,35 @@ export const PartProvenance: MessageFns<PartProvenance> = {
     if (message.sources?.length) {
       obj.sources = message.sources.map((e) => ReconstructionSource.toJSON(e));
     }
-    if (message.confidence !== 0) {
-      obj.confidence = message.confidence;
+    if (message.partConfidence !== 0) {
+      obj.partConfidence = message.partConfidence;
     }
     if (message.fromGnnPrior !== false) {
       obj.fromGnnPrior = message.fromGnnPrior;
     }
-    if (message.reviewerNote !== "") {
-      obj.reviewerNote = message.reviewerNote;
+    if (message.moderatorNotes !== "") {
+      obj.moderatorNotes = message.moderatorNotes;
+    }
+    if (message.coverageQuality !== 0) {
+      obj.coverageQuality = message.coverageQuality;
+    }
+    if (message.gnnVersion !== "") {
+      obj.gnnVersion = message.gnnVersion;
+    }
+    if (message.perSourceConfidences?.length) {
+      obj.perSourceConfidences = message.perSourceConfidences;
+    }
+    if (message.moderatorOverridden !== false) {
+      obj.moderatorOverridden = message.moderatorOverridden;
+    }
+    if (message.moderatorOverriddenAtMs !== undefined) {
+      obj.moderatorOverriddenAtMs = Math.round(message.moderatorOverriddenAtMs);
+    }
+    if (message.hasSourceConflict !== false) {
+      obj.hasSourceConflict = message.hasSourceConflict;
+    }
+    if (message.correction !== undefined) {
+      obj.correction = ProvenanceCorrection.toJSON(message.correction);
     }
     return obj;
   },
@@ -673,9 +1015,18 @@ export const PartProvenance: MessageFns<PartProvenance> = {
   fromPartial(object: DeepPartial<PartProvenance>): PartProvenance {
     const message = createBasePartProvenance();
     message.sources = object.sources?.map((e) => ReconstructionSource.fromPartial(e)) || [];
-    message.confidence = object.confidence ?? 0;
+    message.partConfidence = object.partConfidence ?? 0;
     message.fromGnnPrior = object.fromGnnPrior ?? false;
-    message.reviewerNote = object.reviewerNote ?? "";
+    message.moderatorNotes = object.moderatorNotes ?? "";
+    message.coverageQuality = object.coverageQuality ?? 0;
+    message.gnnVersion = object.gnnVersion ?? "";
+    message.perSourceConfidences = object.perSourceConfidences?.map((e) => e) || [];
+    message.moderatorOverridden = object.moderatorOverridden ?? false;
+    message.moderatorOverriddenAtMs = object.moderatorOverriddenAtMs ?? undefined;
+    message.hasSourceConflict = object.hasSourceConflict ?? false;
+    message.correction = (object.correction !== undefined && object.correction !== null)
+      ? ProvenanceCorrection.fromPartial(object.correction)
+      : undefined;
     return message;
   },
 };
@@ -772,15 +1123,167 @@ export const DimensionRange: MessageFns<DimensionRange> = {
   },
 };
 
+function createBaseTextureProvenance(): TextureProvenance {
+  return {
+    textureSource: "",
+    loraArchetype: "",
+    loraWeight: undefined,
+    controlnetConditioningSource: "",
+    textureConfidence: undefined,
+  };
+}
+
+export const TextureProvenance: MessageFns<TextureProvenance> = {
+  encode(message: TextureProvenance, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.textureSource !== "") {
+      writer.uint32(10).string(message.textureSource);
+    }
+    if (message.loraArchetype !== "") {
+      writer.uint32(18).string(message.loraArchetype);
+    }
+    if (message.loraWeight !== undefined) {
+      writer.uint32(25).double(message.loraWeight);
+    }
+    if (message.controlnetConditioningSource !== "") {
+      writer.uint32(34).string(message.controlnetConditioningSource);
+    }
+    if (message.textureConfidence !== undefined) {
+      writer.uint32(41).double(message.textureConfidence);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): TextureProvenance {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseTextureProvenance();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.textureSource = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.loraArchetype = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 25) {
+            break;
+          }
+
+          message.loraWeight = reader.double();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.controlnetConditioningSource = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 41) {
+            break;
+          }
+
+          message.textureConfidence = reader.double();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): TextureProvenance {
+    return {
+      textureSource: isSet(object.textureSource)
+        ? globalThis.String(object.textureSource)
+        : isSet(object.texture_source)
+        ? globalThis.String(object.texture_source)
+        : "",
+      loraArchetype: isSet(object.loraArchetype)
+        ? globalThis.String(object.loraArchetype)
+        : isSet(object.lora_archetype)
+        ? globalThis.String(object.lora_archetype)
+        : "",
+      loraWeight: isSet(object.loraWeight)
+        ? globalThis.Number(object.loraWeight)
+        : isSet(object.lora_weight)
+        ? globalThis.Number(object.lora_weight)
+        : undefined,
+      controlnetConditioningSource: isSet(object.controlnetConditioningSource)
+        ? globalThis.String(object.controlnetConditioningSource)
+        : isSet(object.controlnet_conditioning_source)
+        ? globalThis.String(object.controlnet_conditioning_source)
+        : "",
+      textureConfidence: isSet(object.textureConfidence)
+        ? globalThis.Number(object.textureConfidence)
+        : isSet(object.texture_confidence)
+        ? globalThis.Number(object.texture_confidence)
+        : undefined,
+    };
+  },
+
+  toJSON(message: TextureProvenance): unknown {
+    const obj: any = {};
+    if (message.textureSource !== "") {
+      obj.textureSource = message.textureSource;
+    }
+    if (message.loraArchetype !== "") {
+      obj.loraArchetype = message.loraArchetype;
+    }
+    if (message.loraWeight !== undefined) {
+      obj.loraWeight = message.loraWeight;
+    }
+    if (message.controlnetConditioningSource !== "") {
+      obj.controlnetConditioningSource = message.controlnetConditioningSource;
+    }
+    if (message.textureConfidence !== undefined) {
+      obj.textureConfidence = message.textureConfidence;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<TextureProvenance>): TextureProvenance {
+    return TextureProvenance.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<TextureProvenance>): TextureProvenance {
+    const message = createBaseTextureProvenance();
+    message.textureSource = object.textureSource ?? "";
+    message.loraArchetype = object.loraArchetype ?? "";
+    message.loraWeight = object.loraWeight ?? undefined;
+    message.controlnetConditioningSource = object.controlnetConditioningSource ?? "";
+    message.textureConfidence = object.textureConfidence ?? undefined;
+    return message;
+  },
+};
+
 function createBaseMass(): Mass {
   return {
     provenance: undefined,
     form: "",
-    storyCount: 0,
+    stories: 0,
     height: undefined,
     width: undefined,
     depth: undefined,
     attributes: {},
+    partId: "",
+    footprintGeometryId: "",
   };
 }
 
@@ -792,8 +1295,8 @@ export const Mass: MessageFns<Mass> = {
     if (message.form !== "") {
       writer.uint32(18).string(message.form);
     }
-    if (message.storyCount !== 0) {
-      writer.uint32(24).uint32(message.storyCount);
+    if (message.stories !== 0) {
+      writer.uint32(24).uint32(message.stories);
     }
     if (message.height !== undefined) {
       DimensionRange.encode(message.height, writer.uint32(34).fork()).join();
@@ -807,6 +1310,12 @@ export const Mass: MessageFns<Mass> = {
     globalThis.Object.entries(message.attributes).forEach(([key, value]: [string, string]) => {
       Mass_AttributesEntry.encode({ key: key as any, value }, writer.uint32(58).fork()).join();
     });
+    if (message.partId !== "") {
+      writer.uint32(66).string(message.partId);
+    }
+    if (message.footprintGeometryId !== "") {
+      writer.uint32(74).string(message.footprintGeometryId);
+    }
     return writer;
   },
 
@@ -838,7 +1347,7 @@ export const Mass: MessageFns<Mass> = {
             break;
           }
 
-          message.storyCount = reader.uint32();
+          message.stories = reader.uint32();
           continue;
         }
         case 4: {
@@ -876,6 +1385,22 @@ export const Mass: MessageFns<Mass> = {
           }
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.partId = reader.string();
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.footprintGeometryId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -889,11 +1414,7 @@ export const Mass: MessageFns<Mass> = {
     return {
       provenance: isSet(object.provenance) ? PartProvenance.fromJSON(object.provenance) : undefined,
       form: isSet(object.form) ? globalThis.String(object.form) : "",
-      storyCount: isSet(object.storyCount)
-        ? globalThis.Number(object.storyCount)
-        : isSet(object.story_count)
-        ? globalThis.Number(object.story_count)
-        : 0,
+      stories: isSet(object.stories) ? globalThis.Number(object.stories) : 0,
       height: isSet(object.height) ? DimensionRange.fromJSON(object.height) : undefined,
       width: isSet(object.width) ? DimensionRange.fromJSON(object.width) : undefined,
       depth: isSet(object.depth) ? DimensionRange.fromJSON(object.depth) : undefined,
@@ -906,6 +1427,16 @@ export const Mass: MessageFns<Mass> = {
           {},
         )
         : {},
+      partId: isSet(object.partId)
+        ? globalThis.String(object.partId)
+        : isSet(object.part_id)
+        ? globalThis.String(object.part_id)
+        : "",
+      footprintGeometryId: isSet(object.footprintGeometryId)
+        ? globalThis.String(object.footprintGeometryId)
+        : isSet(object.footprint_geometry_id)
+        ? globalThis.String(object.footprint_geometry_id)
+        : "",
     };
   },
 
@@ -917,8 +1448,8 @@ export const Mass: MessageFns<Mass> = {
     if (message.form !== "") {
       obj.form = message.form;
     }
-    if (message.storyCount !== 0) {
-      obj.storyCount = Math.round(message.storyCount);
+    if (message.stories !== 0) {
+      obj.stories = Math.round(message.stories);
     }
     if (message.height !== undefined) {
       obj.height = DimensionRange.toJSON(message.height);
@@ -938,6 +1469,12 @@ export const Mass: MessageFns<Mass> = {
         });
       }
     }
+    if (message.partId !== "") {
+      obj.partId = message.partId;
+    }
+    if (message.footprintGeometryId !== "") {
+      obj.footprintGeometryId = message.footprintGeometryId;
+    }
     return obj;
   },
 
@@ -950,7 +1487,7 @@ export const Mass: MessageFns<Mass> = {
       ? PartProvenance.fromPartial(object.provenance)
       : undefined;
     message.form = object.form ?? "";
-    message.storyCount = object.storyCount ?? 0;
+    message.stories = object.stories ?? 0;
     message.height = (object.height !== undefined && object.height !== null)
       ? DimensionRange.fromPartial(object.height)
       : undefined;
@@ -969,6 +1506,8 @@ export const Mass: MessageFns<Mass> = {
       },
       {},
     );
+    message.partId = object.partId ?? "";
+    message.footprintGeometryId = object.footprintGeometryId ?? "";
     return message;
   },
 };
@@ -1049,8 +1588,143 @@ export const Mass_AttributesEntry: MessageFns<Mass_AttributesEntry> = {
   },
 };
 
+function createBaseOpeningOverride(): OpeningOverride {
+  return { bayIndex: 0, overrideKind: "", overridePattern: "", overrideProvenance: undefined };
+}
+
+export const OpeningOverride: MessageFns<OpeningOverride> = {
+  encode(message: OpeningOverride, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.bayIndex !== 0) {
+      writer.uint32(8).uint32(message.bayIndex);
+    }
+    if (message.overrideKind !== "") {
+      writer.uint32(18).string(message.overrideKind);
+    }
+    if (message.overridePattern !== "") {
+      writer.uint32(26).string(message.overridePattern);
+    }
+    if (message.overrideProvenance !== undefined) {
+      PartProvenance.encode(message.overrideProvenance, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): OpeningOverride {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseOpeningOverride();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.bayIndex = reader.uint32();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.overrideKind = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.overridePattern = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.overrideProvenance = PartProvenance.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): OpeningOverride {
+    return {
+      bayIndex: isSet(object.bayIndex)
+        ? globalThis.Number(object.bayIndex)
+        : isSet(object.bay_index)
+        ? globalThis.Number(object.bay_index)
+        : 0,
+      overrideKind: isSet(object.overrideKind)
+        ? globalThis.String(object.overrideKind)
+        : isSet(object.override_kind)
+        ? globalThis.String(object.override_kind)
+        : "",
+      overridePattern: isSet(object.overridePattern)
+        ? globalThis.String(object.overridePattern)
+        : isSet(object.override_pattern)
+        ? globalThis.String(object.override_pattern)
+        : "",
+      overrideProvenance: isSet(object.overrideProvenance)
+        ? PartProvenance.fromJSON(object.overrideProvenance)
+        : isSet(object.override_provenance)
+        ? PartProvenance.fromJSON(object.override_provenance)
+        : undefined,
+    };
+  },
+
+  toJSON(message: OpeningOverride): unknown {
+    const obj: any = {};
+    if (message.bayIndex !== 0) {
+      obj.bayIndex = Math.round(message.bayIndex);
+    }
+    if (message.overrideKind !== "") {
+      obj.overrideKind = message.overrideKind;
+    }
+    if (message.overridePattern !== "") {
+      obj.overridePattern = message.overridePattern;
+    }
+    if (message.overrideProvenance !== undefined) {
+      obj.overrideProvenance = PartProvenance.toJSON(message.overrideProvenance);
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<OpeningOverride>): OpeningOverride {
+    return OpeningOverride.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<OpeningOverride>): OpeningOverride {
+    const message = createBaseOpeningOverride();
+    message.bayIndex = object.bayIndex ?? 0;
+    message.overrideKind = object.overrideKind ?? "";
+    message.overridePattern = object.overridePattern ?? "";
+    message.overrideProvenance = (object.overrideProvenance !== undefined && object.overrideProvenance !== null)
+      ? PartProvenance.fromPartial(object.overrideProvenance)
+      : undefined;
+    return message;
+  },
+};
+
 function createBaseOpeningGrid(): OpeningGrid {
-  return { provenance: undefined, bayCount: 0, floorCount: 0, rhythm: "", openingType: "", attributes: {} };
+  return {
+    provenance: undefined,
+    bayCount: 0,
+    floorCount: 0,
+    windowPattern: "",
+    attributes: {},
+    openingOverrides: [],
+    partId: "",
+    hasStorefrontGround: false,
+  };
 }
 
 export const OpeningGrid: MessageFns<OpeningGrid> = {
@@ -1064,15 +1738,21 @@ export const OpeningGrid: MessageFns<OpeningGrid> = {
     if (message.floorCount !== 0) {
       writer.uint32(24).uint32(message.floorCount);
     }
-    if (message.rhythm !== "") {
-      writer.uint32(34).string(message.rhythm);
-    }
-    if (message.openingType !== "") {
-      writer.uint32(42).string(message.openingType);
+    if (message.windowPattern !== "") {
+      writer.uint32(34).string(message.windowPattern);
     }
     globalThis.Object.entries(message.attributes).forEach(([key, value]: [string, string]) => {
       OpeningGrid_AttributesEntry.encode({ key: key as any, value }, writer.uint32(50).fork()).join();
     });
+    for (const v of message.openingOverrides) {
+      OpeningOverride.encode(v!, writer.uint32(58).fork()).join();
+    }
+    if (message.partId !== "") {
+      writer.uint32(66).string(message.partId);
+    }
+    if (message.hasStorefrontGround !== false) {
+      writer.uint32(72).bool(message.hasStorefrontGround);
+    }
     return writer;
   },
 
@@ -1112,15 +1792,7 @@ export const OpeningGrid: MessageFns<OpeningGrid> = {
             break;
           }
 
-          message.rhythm = reader.string();
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.openingType = reader.string();
+          message.windowPattern = reader.string();
           continue;
         }
         case 6: {
@@ -1132,6 +1804,30 @@ export const OpeningGrid: MessageFns<OpeningGrid> = {
           if (entry6.value !== undefined) {
             message.attributes[entry6.key] = entry6.value;
           }
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.openingOverrides.push(OpeningOverride.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.partId = reader.string();
+          continue;
+        }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.hasStorefrontGround = reader.bool();
           continue;
         }
       }
@@ -1156,11 +1852,10 @@ export const OpeningGrid: MessageFns<OpeningGrid> = {
         : isSet(object.floor_count)
         ? globalThis.Number(object.floor_count)
         : 0,
-      rhythm: isSet(object.rhythm) ? globalThis.String(object.rhythm) : "",
-      openingType: isSet(object.openingType)
-        ? globalThis.String(object.openingType)
-        : isSet(object.opening_type)
-        ? globalThis.String(object.opening_type)
+      windowPattern: isSet(object.windowPattern)
+        ? globalThis.String(object.windowPattern)
+        : isSet(object.window_pattern)
+        ? globalThis.String(object.window_pattern)
         : "",
       attributes: isObject(object.attributes)
         ? (globalThis.Object.entries(object.attributes) as [string, any][]).reduce(
@@ -1171,6 +1866,21 @@ export const OpeningGrid: MessageFns<OpeningGrid> = {
           {},
         )
         : {},
+      openingOverrides: globalThis.Array.isArray(object?.openingOverrides)
+        ? object.openingOverrides.map((e: any) => OpeningOverride.fromJSON(e))
+        : globalThis.Array.isArray(object?.opening_overrides)
+        ? object.opening_overrides.map((e: any) => OpeningOverride.fromJSON(e))
+        : [],
+      partId: isSet(object.partId)
+        ? globalThis.String(object.partId)
+        : isSet(object.part_id)
+        ? globalThis.String(object.part_id)
+        : "",
+      hasStorefrontGround: isSet(object.hasStorefrontGround)
+        ? globalThis.Boolean(object.hasStorefrontGround)
+        : isSet(object.has_storefront_ground)
+        ? globalThis.Boolean(object.has_storefront_ground)
+        : false,
     };
   },
 
@@ -1185,11 +1895,8 @@ export const OpeningGrid: MessageFns<OpeningGrid> = {
     if (message.floorCount !== 0) {
       obj.floorCount = Math.round(message.floorCount);
     }
-    if (message.rhythm !== "") {
-      obj.rhythm = message.rhythm;
-    }
-    if (message.openingType !== "") {
-      obj.openingType = message.openingType;
+    if (message.windowPattern !== "") {
+      obj.windowPattern = message.windowPattern;
     }
     if (message.attributes) {
       const entries = globalThis.Object.entries(message.attributes) as [string, string][];
@@ -1199,6 +1906,15 @@ export const OpeningGrid: MessageFns<OpeningGrid> = {
           obj.attributes[k] = v;
         });
       }
+    }
+    if (message.openingOverrides?.length) {
+      obj.openingOverrides = message.openingOverrides.map((e) => OpeningOverride.toJSON(e));
+    }
+    if (message.partId !== "") {
+      obj.partId = message.partId;
+    }
+    if (message.hasStorefrontGround !== false) {
+      obj.hasStorefrontGround = message.hasStorefrontGround;
     }
     return obj;
   },
@@ -1213,8 +1929,7 @@ export const OpeningGrid: MessageFns<OpeningGrid> = {
       : undefined;
     message.bayCount = object.bayCount ?? 0;
     message.floorCount = object.floorCount ?? 0;
-    message.rhythm = object.rhythm ?? "";
-    message.openingType = object.openingType ?? "";
+    message.windowPattern = object.windowPattern ?? "";
     message.attributes = (globalThis.Object.entries(object.attributes ?? {}) as [string, string][]).reduce(
       (acc: { [key: string]: string }, [key, value]: [string, string]) => {
         if (value !== undefined) {
@@ -1224,6 +1939,9 @@ export const OpeningGrid: MessageFns<OpeningGrid> = {
       },
       {},
     );
+    message.openingOverrides = object.openingOverrides?.map((e) => OpeningOverride.fromPartial(e)) || [];
+    message.partId = object.partId ?? "";
+    message.hasStorefrontGround = object.hasStorefrontGround ?? false;
     return message;
   },
 };
@@ -1305,7 +2023,16 @@ export const OpeningGrid_AttributesEntry: MessageFns<OpeningGrid_AttributesEntry
 };
 
 function createBaseFacade(): Facade {
-  return { provenance: undefined, orientation: "", material: "", color: "", openingGrids: [], attributes: {} };
+  return {
+    provenance: undefined,
+    facadeSide: "",
+    primaryMaterial: "",
+    color: "",
+    openingGrids: [],
+    attributes: {},
+    partId: "",
+    textureProvenance: undefined,
+  };
 }
 
 export const Facade: MessageFns<Facade> = {
@@ -1313,11 +2040,11 @@ export const Facade: MessageFns<Facade> = {
     if (message.provenance !== undefined) {
       PartProvenance.encode(message.provenance, writer.uint32(10).fork()).join();
     }
-    if (message.orientation !== "") {
-      writer.uint32(18).string(message.orientation);
+    if (message.facadeSide !== "") {
+      writer.uint32(18).string(message.facadeSide);
     }
-    if (message.material !== "") {
-      writer.uint32(26).string(message.material);
+    if (message.primaryMaterial !== "") {
+      writer.uint32(26).string(message.primaryMaterial);
     }
     if (message.color !== "") {
       writer.uint32(34).string(message.color);
@@ -1328,6 +2055,12 @@ export const Facade: MessageFns<Facade> = {
     globalThis.Object.entries(message.attributes).forEach(([key, value]: [string, string]) => {
       Facade_AttributesEntry.encode({ key: key as any, value }, writer.uint32(50).fork()).join();
     });
+    if (message.partId !== "") {
+      writer.uint32(58).string(message.partId);
+    }
+    if (message.textureProvenance !== undefined) {
+      TextureProvenance.encode(message.textureProvenance, writer.uint32(66).fork()).join();
+    }
     return writer;
   },
 
@@ -1351,7 +2084,7 @@ export const Facade: MessageFns<Facade> = {
             break;
           }
 
-          message.orientation = reader.string();
+          message.facadeSide = reader.string();
           continue;
         }
         case 3: {
@@ -1359,7 +2092,7 @@ export const Facade: MessageFns<Facade> = {
             break;
           }
 
-          message.material = reader.string();
+          message.primaryMaterial = reader.string();
           continue;
         }
         case 4: {
@@ -1389,6 +2122,22 @@ export const Facade: MessageFns<Facade> = {
           }
           continue;
         }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.partId = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.textureProvenance = TextureProvenance.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1401,8 +2150,16 @@ export const Facade: MessageFns<Facade> = {
   fromJSON(object: any): Facade {
     return {
       provenance: isSet(object.provenance) ? PartProvenance.fromJSON(object.provenance) : undefined,
-      orientation: isSet(object.orientation) ? globalThis.String(object.orientation) : "",
-      material: isSet(object.material) ? globalThis.String(object.material) : "",
+      facadeSide: isSet(object.facadeSide)
+        ? globalThis.String(object.facadeSide)
+        : isSet(object.facade_side)
+        ? globalThis.String(object.facade_side)
+        : "",
+      primaryMaterial: isSet(object.primaryMaterial)
+        ? globalThis.String(object.primaryMaterial)
+        : isSet(object.primary_material)
+        ? globalThis.String(object.primary_material)
+        : "",
       color: isSet(object.color) ? globalThis.String(object.color) : "",
       openingGrids: globalThis.Array.isArray(object?.openingGrids)
         ? object.openingGrids.map((e: any) => OpeningGrid.fromJSON(e))
@@ -1418,6 +2175,16 @@ export const Facade: MessageFns<Facade> = {
           {},
         )
         : {},
+      partId: isSet(object.partId)
+        ? globalThis.String(object.partId)
+        : isSet(object.part_id)
+        ? globalThis.String(object.part_id)
+        : "",
+      textureProvenance: isSet(object.textureProvenance)
+        ? TextureProvenance.fromJSON(object.textureProvenance)
+        : isSet(object.texture_provenance)
+        ? TextureProvenance.fromJSON(object.texture_provenance)
+        : undefined,
     };
   },
 
@@ -1426,11 +2193,11 @@ export const Facade: MessageFns<Facade> = {
     if (message.provenance !== undefined) {
       obj.provenance = PartProvenance.toJSON(message.provenance);
     }
-    if (message.orientation !== "") {
-      obj.orientation = message.orientation;
+    if (message.facadeSide !== "") {
+      obj.facadeSide = message.facadeSide;
     }
-    if (message.material !== "") {
-      obj.material = message.material;
+    if (message.primaryMaterial !== "") {
+      obj.primaryMaterial = message.primaryMaterial;
     }
     if (message.color !== "") {
       obj.color = message.color;
@@ -1447,6 +2214,12 @@ export const Facade: MessageFns<Facade> = {
         });
       }
     }
+    if (message.partId !== "") {
+      obj.partId = message.partId;
+    }
+    if (message.textureProvenance !== undefined) {
+      obj.textureProvenance = TextureProvenance.toJSON(message.textureProvenance);
+    }
     return obj;
   },
 
@@ -1458,8 +2231,8 @@ export const Facade: MessageFns<Facade> = {
     message.provenance = (object.provenance !== undefined && object.provenance !== null)
       ? PartProvenance.fromPartial(object.provenance)
       : undefined;
-    message.orientation = object.orientation ?? "";
-    message.material = object.material ?? "";
+    message.facadeSide = object.facadeSide ?? "";
+    message.primaryMaterial = object.primaryMaterial ?? "";
     message.color = object.color ?? "";
     message.openingGrids = object.openingGrids?.map((e) => OpeningGrid.fromPartial(e)) || [];
     message.attributes = (globalThis.Object.entries(object.attributes ?? {}) as [string, string][]).reduce(
@@ -1471,6 +2244,10 @@ export const Facade: MessageFns<Facade> = {
       },
       {},
     );
+    message.partId = object.partId ?? "";
+    message.textureProvenance = (object.textureProvenance !== undefined && object.textureProvenance !== null)
+      ? TextureProvenance.fromPartial(object.textureProvenance)
+      : undefined;
     return message;
   },
 };
@@ -1552,7 +2329,14 @@ export const Facade_AttributesEntry: MessageFns<Facade_AttributesEntry> = {
 };
 
 function createBaseRoof(): Roof {
-  return { provenance: undefined, form: "", material: "", pitchDegrees: undefined, attributes: {} };
+  return {
+    provenance: undefined,
+    roofType: "",
+    roofMaterial: "",
+    pitchDegrees: undefined,
+    attributes: {},
+    textureProvenance: undefined,
+  };
 }
 
 export const Roof: MessageFns<Roof> = {
@@ -1560,11 +2344,11 @@ export const Roof: MessageFns<Roof> = {
     if (message.provenance !== undefined) {
       PartProvenance.encode(message.provenance, writer.uint32(10).fork()).join();
     }
-    if (message.form !== "") {
-      writer.uint32(18).string(message.form);
+    if (message.roofType !== "") {
+      writer.uint32(18).string(message.roofType);
     }
-    if (message.material !== "") {
-      writer.uint32(26).string(message.material);
+    if (message.roofMaterial !== "") {
+      writer.uint32(26).string(message.roofMaterial);
     }
     if (message.pitchDegrees !== undefined) {
       writer.uint32(33).double(message.pitchDegrees);
@@ -1572,6 +2356,9 @@ export const Roof: MessageFns<Roof> = {
     globalThis.Object.entries(message.attributes).forEach(([key, value]: [string, string]) => {
       Roof_AttributesEntry.encode({ key: key as any, value }, writer.uint32(42).fork()).join();
     });
+    if (message.textureProvenance !== undefined) {
+      TextureProvenance.encode(message.textureProvenance, writer.uint32(50).fork()).join();
+    }
     return writer;
   },
 
@@ -1595,7 +2382,7 @@ export const Roof: MessageFns<Roof> = {
             break;
           }
 
-          message.form = reader.string();
+          message.roofType = reader.string();
           continue;
         }
         case 3: {
@@ -1603,7 +2390,7 @@ export const Roof: MessageFns<Roof> = {
             break;
           }
 
-          message.material = reader.string();
+          message.roofMaterial = reader.string();
           continue;
         }
         case 4: {
@@ -1625,6 +2412,14 @@ export const Roof: MessageFns<Roof> = {
           }
           continue;
         }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.textureProvenance = TextureProvenance.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1637,8 +2432,16 @@ export const Roof: MessageFns<Roof> = {
   fromJSON(object: any): Roof {
     return {
       provenance: isSet(object.provenance) ? PartProvenance.fromJSON(object.provenance) : undefined,
-      form: isSet(object.form) ? globalThis.String(object.form) : "",
-      material: isSet(object.material) ? globalThis.String(object.material) : "",
+      roofType: isSet(object.roofType)
+        ? globalThis.String(object.roofType)
+        : isSet(object.roof_type)
+        ? globalThis.String(object.roof_type)
+        : "",
+      roofMaterial: isSet(object.roofMaterial)
+        ? globalThis.String(object.roofMaterial)
+        : isSet(object.roof_material)
+        ? globalThis.String(object.roof_material)
+        : "",
       pitchDegrees: isSet(object.pitchDegrees)
         ? globalThis.Number(object.pitchDegrees)
         : isSet(object.pitch_degrees)
@@ -1653,6 +2456,11 @@ export const Roof: MessageFns<Roof> = {
           {},
         )
         : {},
+      textureProvenance: isSet(object.textureProvenance)
+        ? TextureProvenance.fromJSON(object.textureProvenance)
+        : isSet(object.texture_provenance)
+        ? TextureProvenance.fromJSON(object.texture_provenance)
+        : undefined,
     };
   },
 
@@ -1661,11 +2469,11 @@ export const Roof: MessageFns<Roof> = {
     if (message.provenance !== undefined) {
       obj.provenance = PartProvenance.toJSON(message.provenance);
     }
-    if (message.form !== "") {
-      obj.form = message.form;
+    if (message.roofType !== "") {
+      obj.roofType = message.roofType;
     }
-    if (message.material !== "") {
-      obj.material = message.material;
+    if (message.roofMaterial !== "") {
+      obj.roofMaterial = message.roofMaterial;
     }
     if (message.pitchDegrees !== undefined) {
       obj.pitchDegrees = message.pitchDegrees;
@@ -1679,6 +2487,9 @@ export const Roof: MessageFns<Roof> = {
         });
       }
     }
+    if (message.textureProvenance !== undefined) {
+      obj.textureProvenance = TextureProvenance.toJSON(message.textureProvenance);
+    }
     return obj;
   },
 
@@ -1690,8 +2501,8 @@ export const Roof: MessageFns<Roof> = {
     message.provenance = (object.provenance !== undefined && object.provenance !== null)
       ? PartProvenance.fromPartial(object.provenance)
       : undefined;
-    message.form = object.form ?? "";
-    message.material = object.material ?? "";
+    message.roofType = object.roofType ?? "";
+    message.roofMaterial = object.roofMaterial ?? "";
     message.pitchDegrees = object.pitchDegrees ?? undefined;
     message.attributes = (globalThis.Object.entries(object.attributes ?? {}) as [string, string][]).reduce(
       (acc: { [key: string]: string }, [key, value]: [string, string]) => {
@@ -1702,6 +2513,9 @@ export const Roof: MessageFns<Roof> = {
       },
       {},
     );
+    message.textureProvenance = (object.textureProvenance !== undefined && object.textureProvenance !== null)
+      ? TextureProvenance.fromPartial(object.textureProvenance)
+      : undefined;
     return message;
   },
 };
@@ -1783,7 +2597,16 @@ export const Roof_AttributesEntry: MessageFns<Roof_AttributesEntry> = {
 };
 
 function createBaseOrnament(): Ornament {
-  return { provenance: undefined, ornamentId: "", kind: "", location: "", material: "", attributes: {} };
+  return {
+    provenance: undefined,
+    ornamentId: "",
+    ornamentKind: "",
+    location: "",
+    ornamentMaterial: "",
+    attributes: {},
+    ornamentStyle: "",
+    textureProvenance: undefined,
+  };
 }
 
 export const Ornament: MessageFns<Ornament> = {
@@ -1794,18 +2617,24 @@ export const Ornament: MessageFns<Ornament> = {
     if (message.ornamentId !== "") {
       writer.uint32(18).string(message.ornamentId);
     }
-    if (message.kind !== "") {
-      writer.uint32(26).string(message.kind);
+    if (message.ornamentKind !== "") {
+      writer.uint32(26).string(message.ornamentKind);
     }
     if (message.location !== "") {
       writer.uint32(34).string(message.location);
     }
-    if (message.material !== "") {
-      writer.uint32(42).string(message.material);
+    if (message.ornamentMaterial !== "") {
+      writer.uint32(42).string(message.ornamentMaterial);
     }
     globalThis.Object.entries(message.attributes).forEach(([key, value]: [string, string]) => {
       Ornament_AttributesEntry.encode({ key: key as any, value }, writer.uint32(50).fork()).join();
     });
+    if (message.ornamentStyle !== "") {
+      writer.uint32(58).string(message.ornamentStyle);
+    }
+    if (message.textureProvenance !== undefined) {
+      TextureProvenance.encode(message.textureProvenance, writer.uint32(66).fork()).join();
+    }
     return writer;
   },
 
@@ -1837,7 +2666,7 @@ export const Ornament: MessageFns<Ornament> = {
             break;
           }
 
-          message.kind = reader.string();
+          message.ornamentKind = reader.string();
           continue;
         }
         case 4: {
@@ -1853,7 +2682,7 @@ export const Ornament: MessageFns<Ornament> = {
             break;
           }
 
-          message.material = reader.string();
+          message.ornamentMaterial = reader.string();
           continue;
         }
         case 6: {
@@ -1865,6 +2694,22 @@ export const Ornament: MessageFns<Ornament> = {
           if (entry6.value !== undefined) {
             message.attributes[entry6.key] = entry6.value;
           }
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.ornamentStyle = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.textureProvenance = TextureProvenance.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -1884,9 +2729,17 @@ export const Ornament: MessageFns<Ornament> = {
         : isSet(object.ornament_id)
         ? globalThis.String(object.ornament_id)
         : "",
-      kind: isSet(object.kind) ? globalThis.String(object.kind) : "",
+      ornamentKind: isSet(object.ornamentKind)
+        ? globalThis.String(object.ornamentKind)
+        : isSet(object.ornament_kind)
+        ? globalThis.String(object.ornament_kind)
+        : "",
       location: isSet(object.location) ? globalThis.String(object.location) : "",
-      material: isSet(object.material) ? globalThis.String(object.material) : "",
+      ornamentMaterial: isSet(object.ornamentMaterial)
+        ? globalThis.String(object.ornamentMaterial)
+        : isSet(object.ornament_material)
+        ? globalThis.String(object.ornament_material)
+        : "",
       attributes: isObject(object.attributes)
         ? (globalThis.Object.entries(object.attributes) as [string, any][]).reduce(
           (acc: { [key: string]: string }, [key, value]: [string, any]) => {
@@ -1896,6 +2749,16 @@ export const Ornament: MessageFns<Ornament> = {
           {},
         )
         : {},
+      ornamentStyle: isSet(object.ornamentStyle)
+        ? globalThis.String(object.ornamentStyle)
+        : isSet(object.ornament_style)
+        ? globalThis.String(object.ornament_style)
+        : "",
+      textureProvenance: isSet(object.textureProvenance)
+        ? TextureProvenance.fromJSON(object.textureProvenance)
+        : isSet(object.texture_provenance)
+        ? TextureProvenance.fromJSON(object.texture_provenance)
+        : undefined,
     };
   },
 
@@ -1907,14 +2770,14 @@ export const Ornament: MessageFns<Ornament> = {
     if (message.ornamentId !== "") {
       obj.ornamentId = message.ornamentId;
     }
-    if (message.kind !== "") {
-      obj.kind = message.kind;
+    if (message.ornamentKind !== "") {
+      obj.ornamentKind = message.ornamentKind;
     }
     if (message.location !== "") {
       obj.location = message.location;
     }
-    if (message.material !== "") {
-      obj.material = message.material;
+    if (message.ornamentMaterial !== "") {
+      obj.ornamentMaterial = message.ornamentMaterial;
     }
     if (message.attributes) {
       const entries = globalThis.Object.entries(message.attributes) as [string, string][];
@@ -1924,6 +2787,12 @@ export const Ornament: MessageFns<Ornament> = {
           obj.attributes[k] = v;
         });
       }
+    }
+    if (message.ornamentStyle !== "") {
+      obj.ornamentStyle = message.ornamentStyle;
+    }
+    if (message.textureProvenance !== undefined) {
+      obj.textureProvenance = TextureProvenance.toJSON(message.textureProvenance);
     }
     return obj;
   },
@@ -1937,9 +2806,9 @@ export const Ornament: MessageFns<Ornament> = {
       ? PartProvenance.fromPartial(object.provenance)
       : undefined;
     message.ornamentId = object.ornamentId ?? "";
-    message.kind = object.kind ?? "";
+    message.ornamentKind = object.ornamentKind ?? "";
     message.location = object.location ?? "";
-    message.material = object.material ?? "";
+    message.ornamentMaterial = object.ornamentMaterial ?? "";
     message.attributes = (globalThis.Object.entries(object.attributes ?? {}) as [string, string][]).reduce(
       (acc: { [key: string]: string }, [key, value]: [string, string]) => {
         if (value !== undefined) {
@@ -1949,6 +2818,10 @@ export const Ornament: MessageFns<Ornament> = {
       },
       {},
     );
+    message.ornamentStyle = object.ornamentStyle ?? "";
+    message.textureProvenance = (object.textureProvenance !== undefined && object.textureProvenance !== null)
+      ? TextureProvenance.fromPartial(object.textureProvenance)
+      : undefined;
     return message;
   },
 };
@@ -2035,8 +2908,10 @@ function createBaseGroundFloor(): GroundFloor {
     useType: "",
     storefrontType: "",
     entryLocation: "",
-    hasAwning: false,
+    hasCanopy: false,
     attributes: {},
+    partId: "",
+    textureProvenance: undefined,
   };
 }
 
@@ -2054,12 +2929,18 @@ export const GroundFloor: MessageFns<GroundFloor> = {
     if (message.entryLocation !== "") {
       writer.uint32(34).string(message.entryLocation);
     }
-    if (message.hasAwning !== false) {
-      writer.uint32(40).bool(message.hasAwning);
+    if (message.hasCanopy !== false) {
+      writer.uint32(40).bool(message.hasCanopy);
     }
     globalThis.Object.entries(message.attributes).forEach(([key, value]: [string, string]) => {
       GroundFloor_AttributesEntry.encode({ key: key as any, value }, writer.uint32(50).fork()).join();
     });
+    if (message.partId !== "") {
+      writer.uint32(58).string(message.partId);
+    }
+    if (message.textureProvenance !== undefined) {
+      TextureProvenance.encode(message.textureProvenance, writer.uint32(66).fork()).join();
+    }
     return writer;
   },
 
@@ -2107,7 +2988,7 @@ export const GroundFloor: MessageFns<GroundFloor> = {
             break;
           }
 
-          message.hasAwning = reader.bool();
+          message.hasCanopy = reader.bool();
           continue;
         }
         case 6: {
@@ -2119,6 +3000,22 @@ export const GroundFloor: MessageFns<GroundFloor> = {
           if (entry6.value !== undefined) {
             message.attributes[entry6.key] = entry6.value;
           }
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.partId = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.textureProvenance = TextureProvenance.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -2148,10 +3045,10 @@ export const GroundFloor: MessageFns<GroundFloor> = {
         : isSet(object.entry_location)
         ? globalThis.String(object.entry_location)
         : "",
-      hasAwning: isSet(object.hasAwning)
-        ? globalThis.Boolean(object.hasAwning)
-        : isSet(object.has_awning)
-        ? globalThis.Boolean(object.has_awning)
+      hasCanopy: isSet(object.hasCanopy)
+        ? globalThis.Boolean(object.hasCanopy)
+        : isSet(object.has_canopy)
+        ? globalThis.Boolean(object.has_canopy)
         : false,
       attributes: isObject(object.attributes)
         ? (globalThis.Object.entries(object.attributes) as [string, any][]).reduce(
@@ -2162,6 +3059,16 @@ export const GroundFloor: MessageFns<GroundFloor> = {
           {},
         )
         : {},
+      partId: isSet(object.partId)
+        ? globalThis.String(object.partId)
+        : isSet(object.part_id)
+        ? globalThis.String(object.part_id)
+        : "",
+      textureProvenance: isSet(object.textureProvenance)
+        ? TextureProvenance.fromJSON(object.textureProvenance)
+        : isSet(object.texture_provenance)
+        ? TextureProvenance.fromJSON(object.texture_provenance)
+        : undefined,
     };
   },
 
@@ -2179,8 +3086,8 @@ export const GroundFloor: MessageFns<GroundFloor> = {
     if (message.entryLocation !== "") {
       obj.entryLocation = message.entryLocation;
     }
-    if (message.hasAwning !== false) {
-      obj.hasAwning = message.hasAwning;
+    if (message.hasCanopy !== false) {
+      obj.hasCanopy = message.hasCanopy;
     }
     if (message.attributes) {
       const entries = globalThis.Object.entries(message.attributes) as [string, string][];
@@ -2190,6 +3097,12 @@ export const GroundFloor: MessageFns<GroundFloor> = {
           obj.attributes[k] = v;
         });
       }
+    }
+    if (message.partId !== "") {
+      obj.partId = message.partId;
+    }
+    if (message.textureProvenance !== undefined) {
+      obj.textureProvenance = TextureProvenance.toJSON(message.textureProvenance);
     }
     return obj;
   },
@@ -2205,7 +3118,7 @@ export const GroundFloor: MessageFns<GroundFloor> = {
     message.useType = object.useType ?? "";
     message.storefrontType = object.storefrontType ?? "";
     message.entryLocation = object.entryLocation ?? "";
-    message.hasAwning = object.hasAwning ?? false;
+    message.hasCanopy = object.hasCanopy ?? false;
     message.attributes = (globalThis.Object.entries(object.attributes ?? {}) as [string, string][]).reduce(
       (acc: { [key: string]: string }, [key, value]: [string, string]) => {
         if (value !== undefined) {
@@ -2215,6 +3128,10 @@ export const GroundFloor: MessageFns<GroundFloor> = {
       },
       {},
     );
+    message.partId = object.partId ?? "";
+    message.textureProvenance = (object.textureProvenance !== undefined && object.textureProvenance !== null)
+      ? TextureProvenance.fromPartial(object.textureProvenance)
+      : undefined;
     return message;
   },
 };
@@ -2611,7 +3528,7 @@ function createBaseReconstructionSpec(): ReconstructionSpec {
     blockId: "",
     title: "",
     status: 0,
-    version: 0,
+    specVersion: 0,
     supersedesSpecId: "",
     createdAtMs: undefined,
     updatedAtMs: undefined,
@@ -2624,6 +3541,12 @@ function createBaseReconstructionSpec(): ReconstructionSpec {
     groundFloor: undefined,
     assets: [],
     metadata: {},
+    tStartMs: undefined,
+    tEndMs: undefined,
+    archetypeClassification: "",
+    gnnVersion: "",
+    publishedAtMs: undefined,
+    license: "",
   };
 }
 
@@ -2653,8 +3576,8 @@ export const ReconstructionSpec: MessageFns<ReconstructionSpec> = {
     if (message.status !== 0) {
       writer.uint32(64).int32(message.status);
     }
-    if (message.version !== 0) {
-      writer.uint32(72).uint32(message.version);
+    if (message.specVersion !== 0) {
+      writer.uint32(72).uint32(message.specVersion);
     }
     if (message.supersedesSpecId !== "") {
       writer.uint32(82).string(message.supersedesSpecId);
@@ -2692,6 +3615,24 @@ export const ReconstructionSpec: MessageFns<ReconstructionSpec> = {
     globalThis.Object.entries(message.metadata).forEach(([key, value]: [string, string]) => {
       ReconstructionSpec_MetadataEntry.encode({ key: key as any, value }, writer.uint32(170).fork()).join();
     });
+    if (message.tStartMs !== undefined) {
+      writer.uint32(176).int64(message.tStartMs);
+    }
+    if (message.tEndMs !== undefined) {
+      writer.uint32(184).int64(message.tEndMs);
+    }
+    if (message.archetypeClassification !== "") {
+      writer.uint32(194).string(message.archetypeClassification);
+    }
+    if (message.gnnVersion !== "") {
+      writer.uint32(202).string(message.gnnVersion);
+    }
+    if (message.publishedAtMs !== undefined) {
+      writer.uint32(208).int64(message.publishedAtMs);
+    }
+    if (message.license !== "") {
+      writer.uint32(218).string(message.license);
+    }
     return writer;
   },
 
@@ -2771,7 +3712,7 @@ export const ReconstructionSpec: MessageFns<ReconstructionSpec> = {
             break;
           }
 
-          message.version = reader.uint32();
+          message.specVersion = reader.uint32();
           continue;
         }
         case 10: {
@@ -2873,6 +3814,54 @@ export const ReconstructionSpec: MessageFns<ReconstructionSpec> = {
           }
           continue;
         }
+        case 22: {
+          if (tag !== 176) {
+            break;
+          }
+
+          message.tStartMs = longToNumber(reader.int64());
+          continue;
+        }
+        case 23: {
+          if (tag !== 184) {
+            break;
+          }
+
+          message.tEndMs = longToNumber(reader.int64());
+          continue;
+        }
+        case 24: {
+          if (tag !== 194) {
+            break;
+          }
+
+          message.archetypeClassification = reader.string();
+          continue;
+        }
+        case 25: {
+          if (tag !== 202) {
+            break;
+          }
+
+          message.gnnVersion = reader.string();
+          continue;
+        }
+        case 26: {
+          if (tag !== 208) {
+            break;
+          }
+
+          message.publishedAtMs = longToNumber(reader.int64());
+          continue;
+        }
+        case 27: {
+          if (tag !== 218) {
+            break;
+          }
+
+          message.license = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2916,7 +3905,11 @@ export const ReconstructionSpec: MessageFns<ReconstructionSpec> = {
         : "",
       title: isSet(object.title) ? globalThis.String(object.title) : "",
       status: isSet(object.status) ? reconstructionSpecStatusFromJSON(object.status) : 0,
-      version: isSet(object.version) ? globalThis.Number(object.version) : 0,
+      specVersion: isSet(object.specVersion)
+        ? globalThis.Number(object.specVersion)
+        : isSet(object.spec_version)
+        ? globalThis.Number(object.spec_version)
+        : 0,
       supersedesSpecId: isSet(object.supersedesSpecId)
         ? globalThis.String(object.supersedesSpecId)
         : isSet(object.supersedes_spec_id)
@@ -2967,6 +3960,32 @@ export const ReconstructionSpec: MessageFns<ReconstructionSpec> = {
           {},
         )
         : {},
+      tStartMs: isSet(object.tStartMs)
+        ? globalThis.Number(object.tStartMs)
+        : isSet(object.t_start_ms)
+        ? globalThis.Number(object.t_start_ms)
+        : undefined,
+      tEndMs: isSet(object.tEndMs)
+        ? globalThis.Number(object.tEndMs)
+        : isSet(object.t_end_ms)
+        ? globalThis.Number(object.t_end_ms)
+        : undefined,
+      archetypeClassification: isSet(object.archetypeClassification)
+        ? globalThis.String(object.archetypeClassification)
+        : isSet(object.archetype_classification)
+        ? globalThis.String(object.archetype_classification)
+        : "",
+      gnnVersion: isSet(object.gnnVersion)
+        ? globalThis.String(object.gnnVersion)
+        : isSet(object.gnn_version)
+        ? globalThis.String(object.gnn_version)
+        : "",
+      publishedAtMs: isSet(object.publishedAtMs)
+        ? globalThis.Number(object.publishedAtMs)
+        : isSet(object.published_at_ms)
+        ? globalThis.Number(object.published_at_ms)
+        : undefined,
+      license: isSet(object.license) ? globalThis.String(object.license) : "",
     };
   },
 
@@ -2996,8 +4015,8 @@ export const ReconstructionSpec: MessageFns<ReconstructionSpec> = {
     if (message.status !== 0) {
       obj.status = reconstructionSpecStatusToJSON(message.status);
     }
-    if (message.version !== 0) {
-      obj.version = Math.round(message.version);
+    if (message.specVersion !== 0) {
+      obj.specVersion = Math.round(message.specVersion);
     }
     if (message.supersedesSpecId !== "") {
       obj.supersedesSpecId = message.supersedesSpecId;
@@ -3041,6 +4060,24 @@ export const ReconstructionSpec: MessageFns<ReconstructionSpec> = {
         });
       }
     }
+    if (message.tStartMs !== undefined) {
+      obj.tStartMs = Math.round(message.tStartMs);
+    }
+    if (message.tEndMs !== undefined) {
+      obj.tEndMs = Math.round(message.tEndMs);
+    }
+    if (message.archetypeClassification !== "") {
+      obj.archetypeClassification = message.archetypeClassification;
+    }
+    if (message.gnnVersion !== "") {
+      obj.gnnVersion = message.gnnVersion;
+    }
+    if (message.publishedAtMs !== undefined) {
+      obj.publishedAtMs = Math.round(message.publishedAtMs);
+    }
+    if (message.license !== "") {
+      obj.license = message.license;
+    }
     return obj;
   },
 
@@ -3059,7 +4096,7 @@ export const ReconstructionSpec: MessageFns<ReconstructionSpec> = {
     message.blockId = object.blockId ?? "";
     message.title = object.title ?? "";
     message.status = object.status ?? 0;
-    message.version = object.version ?? 0;
+    message.specVersion = object.specVersion ?? 0;
     message.supersedesSpecId = object.supersedesSpecId ?? "";
     message.createdAtMs = object.createdAtMs ?? undefined;
     message.updatedAtMs = object.updatedAtMs ?? undefined;
@@ -3082,6 +4119,12 @@ export const ReconstructionSpec: MessageFns<ReconstructionSpec> = {
       },
       {},
     );
+    message.tStartMs = object.tStartMs ?? undefined;
+    message.tEndMs = object.tEndMs ?? undefined;
+    message.archetypeClassification = object.archetypeClassification ?? "";
+    message.gnnVersion = object.gnnVersion ?? "";
+    message.publishedAtMs = object.publishedAtMs ?? undefined;
+    message.license = object.license ?? "";
     return message;
   },
 };

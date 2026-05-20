@@ -34,11 +34,18 @@ message ReconstructionSource {
   map<string, string> metadata = 7;
 }
 
+message ProvenanceCorrection {
+  string correction_id = 1;
+  string correction_type = 2;
+  string correction_reasoning = 3;
+  optional int64 correction_approved_at_ms = 4;
+}
+
 message PartProvenance {
   repeated ReconstructionSource sources = 1;
-  double confidence = 2;
+  double part_confidence = 2;
   bool from_gnn_prior = 3;
-  string reviewer_note = 4;
+  string moderator_notes = 4;
   // Phase 5 extension. 0-1 score indicating how authoritative the
   // source lanes are for this part (assessor records score high,
   // OSM-inferred low, footprint-only lowest). Used by Phase 6 training
@@ -52,6 +59,11 @@ message PartProvenance {
   // not GNN-derived. Format: `<repo>/<short_sha>` or `v<semver>`
   // depending on the training artifact's manifest.
   string gnn_version = 6;
+  repeated double per_source_confidences = 7;
+  bool moderator_overridden = 8;
+  optional int64 moderator_overridden_at_ms = 9;
+  bool has_source_conflict = 10;
+  ProvenanceCorrection correction = 11;
 }
 
 message DimensionRange {
@@ -60,49 +72,74 @@ message DimensionRange {
   string unit = 3;
 }
 
+message TextureProvenance {
+  string texture_source = 1;
+  string lora_archetype = 2;
+  optional double lora_weight = 3;
+  string controlnet_conditioning_source = 4;
+  optional double texture_confidence = 5;
+}
+
 message Mass {
   PartProvenance provenance = 1;
   string form = 2;
-  uint32 story_count = 3;
+  uint32 stories = 3;
   DimensionRange height = 4;
   DimensionRange width = 5;
   DimensionRange depth = 6;
   map<string, string> attributes = 7;
+  string part_id = 8;
+  string footprint_geometry_id = 9;
+}
+
+message OpeningOverride {
+  uint32 bay_index = 1;
+  string override_kind = 2;
+  string override_pattern = 3;
+  PartProvenance override_provenance = 4;
 }
 
 message OpeningGrid {
   PartProvenance provenance = 1;
   uint32 bay_count = 2;
   uint32 floor_count = 3;
-  string rhythm = 4;
-  string opening_type = 5;
+  string window_pattern = 4;
+  reserved 5;
   map<string, string> attributes = 6;
+  repeated OpeningOverride opening_overrides = 7;
+  string part_id = 8;
+  bool has_storefront_ground = 9;
 }
 
 message Facade {
   PartProvenance provenance = 1;
-  string orientation = 2;
-  string material = 3;
+  string facade_side = 2;
+  string primary_material = 3;
   string color = 4;
   repeated OpeningGrid opening_grids = 5;
   map<string, string> attributes = 6;
+  string part_id = 7;
+  TextureProvenance texture_provenance = 8;
 }
 
 message Roof {
   PartProvenance provenance = 1;
-  string form = 2;
-  string material = 3;
+  string roof_type = 2;
+  string roof_material = 3;
   optional double pitch_degrees = 4;
   map<string, string> attributes = 5;
+  TextureProvenance texture_provenance = 6;
 }
 
 message Ornament {
   PartProvenance provenance = 1;
   string ornament_id = 2;
-  string kind = 3;
+  string ornament_kind = 3;
   string location = 4;
-  string material = 5;
+  string ornament_material = 5;
   map<string, string> attributes = 6;
+  string ornament_style = 7;
+  TextureProvenance texture_provenance = 8;
 }
 
 message GroundFloor {
@@ -110,8 +147,10 @@ message GroundFloor {
   string use_type = 2;
   string storefront_type = 3;
   string entry_location = 4;
-  bool has_awning = 5;
+  bool has_canopy = 5;
   map<string, string> attributes = 6;
+  string part_id = 7;
+  TextureProvenance texture_provenance = 8;
 }
 
 message ReconstructionAsset {
@@ -134,7 +173,7 @@ message ReconstructionSpec {
   string block_id = 6;
   string title = 7;
   ReconstructionSpecStatus status = 8;
-  uint32 version = 9;
+  uint32 spec_version = 9;
   string supersedes_spec_id = 10;
   optional int64 created_at_ms = 11;
   optional int64 updated_at_ms = 12;
@@ -147,4 +186,10 @@ message ReconstructionSpec {
   GroundFloor ground_floor = 19;
   repeated ReconstructionAsset assets = 20;
   map<string, string> metadata = 21;
+  optional int64 t_start_ms = 22;
+  optional int64 t_end_ms = 23;
+  string archetype_classification = 24;
+  string gnn_version = 25;
+  optional int64 published_at_ms = 26;
+  string license = 27;
 }

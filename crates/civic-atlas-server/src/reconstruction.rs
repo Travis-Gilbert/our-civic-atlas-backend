@@ -5,9 +5,10 @@ use civic_atlas_types::civic_atlas::v1::{
     ApproveSpecRequest, ApproveSpecResponse, Facade, GetReconstructionSpecRequest,
     GetReconstructionSpecResponse, GroundFloor, ListAssetsForSpecRequest,
     ListAssetsForSpecResponse, ListReconstructionSpecsRequest, ListReconstructionSpecsResponse,
-    Mass, OpeningGrid, Ornament, PartProvenance, ReconstructionAsset, ReconstructionSource,
-    ReconstructionSpec, ReconstructionSpecStatus, Roof, SaveDraftSpecRequest,
-    SaveDraftSpecResponse, SubmitSpecForReviewRequest, SubmitSpecForReviewResponse, TenantContext,
+    Mass, OpeningGrid, OpeningOverride, Ornament, PartProvenance, ProvenanceCorrection,
+    ReconstructionAsset, ReconstructionSource, ReconstructionSpec, ReconstructionSpecStatus, Roof,
+    SaveDraftSpecRequest, SaveDraftSpecResponse, SubmitSpecForReviewRequest,
+    SubmitSpecForReviewResponse, TenantContext, TextureProvenance,
 };
 use serde_json::{json, Value};
 use sqlx::{postgres::PgRow, types::Json, PgPool, Postgres, Row, Transaction};
@@ -240,7 +241,7 @@ impl ReconstructionGrpc for ReconstructionGrpcService {
         )
         .bind(tenant_id)
         .bind(&spec.spec_id)
-        .bind(spec.version as i32)
+        .bind(spec.spec_version as i32)
         .bind(&spec.reviewed_by)
         .bind(Json(spec_to_json(&spec)))
         .execute(&mut *tx)
@@ -368,7 +369,7 @@ async fn upsert_spec(
     )
     .bind(tenant_id)
     .bind(&spec.spec_id)
-    .bind(spec.version as i32)
+    .bind(spec.spec_version as i32)
     .bind(status)
     .bind(building_id)
     .bind(parcel_id)
@@ -486,11 +487,11 @@ async fn enqueue_rustyred_projection(
     tenant_id: Uuid,
     spec: &ReconstructionSpec,
 ) -> Result<(), Status> {
-    let idempotency_key = projection_idempotency_key(tenant_id, &spec.spec_id, spec.version);
+    let idempotency_key = projection_idempotency_key(tenant_id, &spec.spec_id, spec.spec_version);
     let payload = json!({
         "projectionKind": "BuildingPresence",
         "specId": spec.spec_id,
-        "version": spec.version,
+        "specVersion": spec.spec_version,
         "buildingId": spec.building_id,
         "civicObjectId": spec.civic_object_id,
     });
@@ -505,7 +506,7 @@ async fn enqueue_rustyred_projection(
     )
     .bind(tenant_id)
     .bind(&spec.spec_id)
-    .bind(spec.version as i32)
+    .bind(spec.spec_version as i32)
     .bind(idempotency_key)
     .bind(Json(payload))
     .execute(&mut **tx)
@@ -523,7 +524,9 @@ fn project_building_parts(spec: &ReconstructionSpec) -> Vec<PartProjection> {
             mass.provenance.as_ref(),
             json!({
                 "form": &mass.form,
-                "storyCount": mass.story_count,
+                "stories": mass.stories,
+                "partId": &mass.part_id,
+                "footprintGeometryId": &mass.footprint_geometry_id,
                 "attributes": &mass.attributes,
             }),
         ));
@@ -537,9 +540,10 @@ fn project_building_parts(spec: &ReconstructionSpec) -> Vec<PartProjection> {
             "Roof",
             roof.provenance.as_ref(),
             json!({
-                "form": &roof.form,
-                "material": &roof.material,
+                "roofType": &roof.roof_type,
+                "roofMaterial": &roof.roof_material,
                 "pitchDegrees": roof.pitch_degrees,
+                "textureProvenance": roof.texture_provenance.as_ref().map(texture_provenance_json),
                 "attributes": &roof.attributes,
             }),
         ));
@@ -555,9 +559,11 @@ fn project_building_parts(spec: &ReconstructionSpec) -> Vec<PartProjection> {
             "Ornament",
             ornament.provenance.as_ref(),
             json!({
-                "kind": &ornament.kind,
+                "ornamentKind": &ornament.ornament_kind,
                 "location": &ornament.location,
-                "material": &ornament.material,
+                "ornamentMaterial": &ornament.ornament_material,
+                "ornamentStyle": &ornament.ornament_style,
+                "textureProvenance": ornament.texture_provenance.as_ref().map(texture_provenance_json),
                 "attributes": &ornament.attributes,
             }),
         ));
@@ -571,7 +577,9 @@ fn project_building_parts(spec: &ReconstructionSpec) -> Vec<PartProjection> {
                 "useType": &ground_floor.use_type,
                 "storefrontType": &ground_floor.storefront_type,
                 "entryLocation": &ground_floor.entry_location,
-                "hasAwning": ground_floor.has_awning,
+                "hasCanopy": ground_floor.has_canopy,
+                "partId": &ground_floor.part_id,
+                "textureProvenance": ground_floor.texture_provenance.as_ref().map(texture_provenance_json),
                 "attributes": &ground_floor.attributes,
             }),
         ));
@@ -585,9 +593,11 @@ fn push_facade_parts(parts: &mut Vec<PartProjection>, index: usize, facade: &Fac
         "Facade",
         facade.provenance.as_ref(),
         json!({
-            "orientation": &facade.orientation,
-            "material": &facade.material,
+            "facadeSide": &facade.facade_side,
+            "primaryMaterial": &facade.primary_material,
             "color": &facade.color,
+            "partId": &facade.part_id,
+            "textureProvenance": facade.texture_provenance.as_ref().map(texture_provenance_json),
             "attributes": &facade.attributes,
         }),
     ));
@@ -599,9 +609,11 @@ fn push_facade_parts(parts: &mut Vec<PartProjection>, index: usize, facade: &Fac
             json!({
                 "bayCount": grid.bay_count,
                 "floorCount": grid.floor_count,
-                "rhythm": &grid.rhythm,
-                "openingType": &grid.opening_type,
+                "windowPattern": &grid.window_pattern,
                 "attributes": &grid.attributes,
+                "openingOverrides": grid.opening_overrides.iter().map(opening_override_json).collect::<Vec<_>>(),
+                "partId": &grid.part_id,
+                "hasStorefrontGround": grid.has_storefront_ground,
             }),
         ));
     }
@@ -613,7 +625,9 @@ fn part_projection(
     provenance: Option<&PartProvenance>,
     payload: Value,
 ) -> PartProjection {
-    let confidence = provenance.map(|item| item.confidence).unwrap_or_default();
+    let confidence = provenance
+        .map(|item| item.part_confidence)
+        .unwrap_or_default();
     let source_ids = provenance
         .map(|item| {
             item.sources
@@ -646,8 +660,10 @@ fn spec_to_json(spec: &ReconstructionSpec) -> Value {
         "blockId": &spec.block_id,
         "title": &spec.title,
         "status": status_to_sql(spec.status).unwrap_or("draft"),
-        "version": spec.version,
+        "specVersion": spec.spec_version,
         "supersedesSpecId": &spec.supersedes_spec_id,
+        "createdAtMs": spec.created_at_ms,
+        "updatedAtMs": spec.updated_at_ms,
         "createdBy": &spec.created_by,
         "reviewedBy": &spec.reviewed_by,
         "mass": spec.mass.as_ref().map(mass_json),
@@ -656,6 +672,12 @@ fn spec_to_json(spec: &ReconstructionSpec) -> Value {
         "ornaments": spec.ornaments.iter().map(ornament_json).collect::<Vec<_>>(),
         "groundFloor": spec.ground_floor.as_ref().map(ground_floor_json),
         "metadata": &spec.metadata,
+        "tStartMs": spec.t_start_ms,
+        "tEndMs": spec.t_end_ms,
+        "archetypeClassification": &spec.archetype_classification,
+        "gnnVersion": &spec.gnn_version,
+        "publishedAtMs": spec.published_at_ms,
+        "license": &spec.license,
     })
 }
 
@@ -666,7 +688,7 @@ fn spec_from_row(row: &PgRow) -> Result<ReconstructionSpec, Status> {
     let reviewed_by: Option<String> = row.try_get("reviewed_by").map_err(db_status)?;
     let mut spec = spec_from_json(&value.0);
     spec.status = status_from_sql(&status) as i32;
-    spec.version = version.max(0) as u32;
+    spec.spec_version = version.max(0) as u32;
     spec.reviewed_by = reviewed_by.unwrap_or_default();
     Ok(spec)
 }
@@ -686,10 +708,12 @@ fn spec_from_json(value: &Value) -> ReconstructionSpec {
             .and_then(Value::as_str)
             .map(status_from_sql)
             .unwrap_or(ReconstructionSpecStatus::Draft) as i32,
-        version: value.get("version").and_then(Value::as_u64).unwrap_or(1) as u32,
+        spec_version: get_any(value, &["specVersion", "spec_version", "version"])
+            .and_then(Value::as_u64)
+            .unwrap_or(1) as u32,
         supersedes_spec_id: string_json_any(value, &["supersedesSpecId", "supersedes_spec_id"]),
-        created_at_ms: None,
-        updated_at_ms: None,
+        created_at_ms: i64_json_any(value, &["createdAtMs", "created_at_ms"]),
+        updated_at_ms: i64_json_any(value, &["updatedAtMs", "updated_at_ms"]),
         created_by: string_json_any(value, &["createdBy", "created_by"]),
         reviewed_by: string_json_any(value, &["reviewedBy", "reviewed_by"]),
         mass: get_any(value, &["mass"]).map(mass_from_json),
@@ -707,6 +731,15 @@ fn spec_from_json(value: &Value) -> ReconstructionSpec {
         ground_floor: get_any(value, &["groundFloor", "ground_floor"]).map(ground_floor_from_json),
         assets: Vec::new(),
         metadata: Default::default(),
+        t_start_ms: i64_json_any(value, &["tStartMs", "t_start_ms"]),
+        t_end_ms: i64_json_any(value, &["tEndMs", "t_end_ms"]),
+        archetype_classification: string_json_any(
+            value,
+            &["archetypeClassification", "archetype_classification"],
+        ),
+        gnn_version: string_json_any(value, &["gnnVersion", "gnn_version"]),
+        published_at_ms: i64_json_any(value, &["publishedAtMs", "published_at_ms"]),
+        license: string_json(value, "license"),
     }
 }
 
@@ -750,7 +783,9 @@ fn mass_json(mass: &Mass) -> Value {
     json!({
         "provenance": mass.provenance.as_ref().map(provenance_json),
         "form": &mass.form,
-        "storyCount": mass.story_count,
+        "stories": mass.stories,
+        "partId": &mass.part_id,
+        "footprintGeometryId": &mass.footprint_geometry_id,
         "attributes": &mass.attributes,
     })
 }
@@ -758,10 +793,12 @@ fn mass_json(mass: &Mass) -> Value {
 fn facade_json(facade: &Facade) -> Value {
     json!({
         "provenance": facade.provenance.as_ref().map(provenance_json),
-        "orientation": &facade.orientation,
-        "material": &facade.material,
+        "facadeSide": &facade.facade_side,
+        "primaryMaterial": &facade.primary_material,
         "color": &facade.color,
         "openingGrids": facade.opening_grids.iter().map(opening_grid_json).collect::<Vec<_>>(),
+        "partId": &facade.part_id,
+        "textureProvenance": facade.texture_provenance.as_ref().map(texture_provenance_json),
         "attributes": &facade.attributes,
     })
 }
@@ -771,18 +808,30 @@ fn opening_grid_json(grid: &OpeningGrid) -> Value {
         "provenance": grid.provenance.as_ref().map(provenance_json),
         "bayCount": grid.bay_count,
         "floorCount": grid.floor_count,
-        "rhythm": &grid.rhythm,
-        "openingType": &grid.opening_type,
+        "windowPattern": &grid.window_pattern,
+        "openingOverrides": grid.opening_overrides.iter().map(opening_override_json).collect::<Vec<_>>(),
+        "partId": &grid.part_id,
+        "hasStorefrontGround": grid.has_storefront_ground,
         "attributes": &grid.attributes,
+    })
+}
+
+fn opening_override_json(opening_override: &OpeningOverride) -> Value {
+    json!({
+        "bayIndex": opening_override.bay_index,
+        "overrideKind": &opening_override.override_kind,
+        "overridePattern": &opening_override.override_pattern,
+        "overrideProvenance": opening_override.override_provenance.as_ref().map(provenance_json),
     })
 }
 
 fn roof_json(roof: &Roof) -> Value {
     json!({
         "provenance": roof.provenance.as_ref().map(provenance_json),
-        "form": &roof.form,
-        "material": &roof.material,
+        "roofType": &roof.roof_type,
+        "roofMaterial": &roof.roof_material,
         "pitchDegrees": roof.pitch_degrees,
+        "textureProvenance": roof.texture_provenance.as_ref().map(texture_provenance_json),
         "attributes": &roof.attributes,
     })
 }
@@ -791,9 +840,11 @@ fn ornament_json(ornament: &Ornament) -> Value {
     json!({
         "provenance": ornament.provenance.as_ref().map(provenance_json),
         "ornamentId": &ornament.ornament_id,
-        "kind": &ornament.kind,
+        "ornamentKind": &ornament.ornament_kind,
         "location": &ornament.location,
-        "material": &ornament.material,
+        "ornamentMaterial": &ornament.ornament_material,
+        "ornamentStyle": &ornament.ornament_style,
+        "textureProvenance": ornament.texture_provenance.as_ref().map(texture_provenance_json),
         "attributes": &ornament.attributes,
     })
 }
@@ -804,16 +855,25 @@ fn ground_floor_json(ground_floor: &GroundFloor) -> Value {
         "useType": &ground_floor.use_type,
         "storefrontType": &ground_floor.storefront_type,
         "entryLocation": &ground_floor.entry_location,
-        "hasAwning": ground_floor.has_awning,
+        "hasCanopy": ground_floor.has_canopy,
+        "partId": &ground_floor.part_id,
+        "textureProvenance": ground_floor.texture_provenance.as_ref().map(texture_provenance_json),
         "attributes": &ground_floor.attributes,
     })
 }
 
 fn provenance_json(provenance: &PartProvenance) -> Value {
     json!({
-        "confidence": provenance.confidence,
+        "partConfidence": provenance.part_confidence,
         "fromGnnPrior": provenance.from_gnn_prior,
-        "reviewerNote": &provenance.reviewer_note,
+        "moderatorNotes": &provenance.moderator_notes,
+        "coverageQuality": provenance.coverage_quality,
+        "gnnVersion": &provenance.gnn_version,
+        "perSourceConfidences": &provenance.per_source_confidences,
+        "moderatorOverridden": provenance.moderator_overridden,
+        "moderatorOverriddenAtMs": provenance.moderator_overridden_at_ms,
+        "hasSourceConflict": provenance.has_source_conflict,
+        "correction": provenance.correction.as_ref().map(correction_json),
         "sources": provenance.sources.iter().map(|source| json!({
             "sourceId": &source.source_id,
             "title": &source.title,
@@ -822,25 +882,52 @@ fn provenance_json(provenance: &PartProvenance) -> Value {
     })
 }
 
+fn correction_json(correction: &ProvenanceCorrection) -> Value {
+    json!({
+        "correctionId": &correction.correction_id,
+        "correctionType": &correction.correction_type,
+        "correctionReasoning": &correction.correction_reasoning,
+        "correctionApprovedAtMs": correction.correction_approved_at_ms,
+    })
+}
+
+fn texture_provenance_json(texture: &TextureProvenance) -> Value {
+    json!({
+        "textureSource": &texture.texture_source,
+        "loraArchetype": &texture.lora_archetype,
+        "loraWeight": texture.lora_weight,
+        "controlnetConditioningSource": &texture.controlnet_conditioning_source,
+        "textureConfidence": texture.texture_confidence,
+    })
+}
+
 fn mass_from_json(value: &Value) -> Mass {
     Mass {
         provenance: value.get("provenance").map(provenance_from_json),
         form: string_json(value, "form"),
-        story_count: get_any(value, &["storyCount", "story_count"])
+        stories: get_any(value, &["stories", "storyCount", "story_count"])
             .and_then(Value::as_u64)
             .unwrap_or(0) as u32,
         height: None,
         width: None,
         depth: None,
         attributes: Default::default(),
+        part_id: string_json_any(value, &["partId", "part_id"]),
+        footprint_geometry_id: string_json_any(
+            value,
+            &["footprintGeometryId", "footprint_geometry_id"],
+        ),
     }
 }
 
 fn facade_from_json(value: &Value) -> Facade {
     Facade {
         provenance: value.get("provenance").map(provenance_from_json),
-        orientation: string_json(value, "orientation"),
-        material: string_json(value, "material"),
+        facade_side: string_json_any(value, &["facadeSide", "facade_side", "orientation"]),
+        primary_material: string_json_any(
+            value,
+            &["primaryMaterial", "primary_material", "material"],
+        ),
         color: string_json(value, "color"),
         opening_grids: value
             .get("openingGrids")
@@ -849,6 +936,9 @@ fn facade_from_json(value: &Value) -> Facade {
             .map(|items| items.iter().map(opening_grid_from_json).collect())
             .unwrap_or_default(),
         attributes: Default::default(),
+        part_id: string_json_any(value, &["partId", "part_id"]),
+        texture_provenance: get_any(value, &["textureProvenance", "texture_provenance"])
+            .map(texture_provenance_from_json),
     }
 }
 
@@ -861,19 +951,49 @@ fn opening_grid_from_json(value: &Value) -> OpeningGrid {
         floor_count: get_any(value, &["floorCount", "floor_count"])
             .and_then(Value::as_u64)
             .unwrap_or(0) as u32,
-        rhythm: string_json(value, "rhythm"),
-        opening_type: string_json_any(value, &["openingType", "opening_type"]),
+        window_pattern: string_json_any(
+            value,
+            &[
+                "windowPattern",
+                "window_pattern",
+                "rhythm",
+                "openingType",
+                "opening_type",
+            ],
+        ),
+        opening_overrides: get_any(value, &["openingOverrides", "opening_overrides"])
+            .and_then(Value::as_array)
+            .map(|items| items.iter().map(opening_override_from_json).collect())
+            .unwrap_or_default(),
         attributes: Default::default(),
+        part_id: string_json_any(value, &["partId", "part_id"]),
+        has_storefront_ground: get_any(value, &["hasStorefrontGround", "has_storefront_ground"])
+            .and_then(Value::as_bool)
+            .unwrap_or_default(),
+    }
+}
+
+fn opening_override_from_json(value: &Value) -> OpeningOverride {
+    OpeningOverride {
+        bay_index: get_any(value, &["bayIndex", "bay_index"])
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as u32,
+        override_kind: string_json_any(value, &["overrideKind", "override_kind"]),
+        override_pattern: string_json_any(value, &["overridePattern", "override_pattern"]),
+        override_provenance: get_any(value, &["overrideProvenance", "override_provenance"])
+            .map(provenance_from_json),
     }
 }
 
 fn roof_from_json(value: &Value) -> Roof {
     Roof {
         provenance: value.get("provenance").map(provenance_from_json),
-        form: string_json(value, "form"),
-        material: string_json(value, "material"),
+        roof_type: string_json_any(value, &["roofType", "roof_type", "form"]),
+        roof_material: string_json_any(value, &["roofMaterial", "roof_material", "material"]),
         pitch_degrees: get_any(value, &["pitchDegrees", "pitch_degrees"]).and_then(Value::as_f64),
         attributes: Default::default(),
+        texture_provenance: get_any(value, &["textureProvenance", "texture_provenance"])
+            .map(texture_provenance_from_json),
     }
 }
 
@@ -881,10 +1001,16 @@ fn ornament_from_json(value: &Value) -> Ornament {
     Ornament {
         provenance: value.get("provenance").map(provenance_from_json),
         ornament_id: string_json_any(value, &["ornamentId", "ornament_id"]),
-        kind: string_json(value, "kind"),
+        ornament_kind: string_json_any(value, &["ornamentKind", "ornament_kind", "kind"]),
         location: string_json(value, "location"),
-        material: string_json(value, "material"),
+        ornament_material: string_json_any(
+            value,
+            &["ornamentMaterial", "ornament_material", "material"],
+        ),
         attributes: Default::default(),
+        ornament_style: string_json_any(value, &["ornamentStyle", "ornament_style"]),
+        texture_provenance: get_any(value, &["textureProvenance", "texture_provenance"])
+            .map(texture_provenance_from_json),
     }
 }
 
@@ -894,10 +1020,16 @@ fn ground_floor_from_json(value: &Value) -> GroundFloor {
         use_type: string_json_any(value, &["useType", "use_type"]),
         storefront_type: string_json_any(value, &["storefrontType", "storefront_type"]),
         entry_location: string_json_any(value, &["entryLocation", "entry_location"]),
-        has_awning: get_any(value, &["hasAwning", "has_awning"])
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        has_canopy: get_any(
+            value,
+            &["hasCanopy", "has_canopy", "hasAwning", "has_awning"],
+        )
+        .and_then(Value::as_bool)
+        .unwrap_or(false),
         attributes: Default::default(),
+        part_id: string_json_any(value, &["partId", "part_id"]),
+        texture_provenance: get_any(value, &["textureProvenance", "texture_provenance"])
+            .map(texture_provenance_from_json),
     }
 }
 
@@ -908,18 +1040,70 @@ fn provenance_from_json(value: &Value) -> PartProvenance {
             .and_then(Value::as_array)
             .map(|items| items.iter().map(source_from_json).collect())
             .unwrap_or_default(),
-        confidence: value
-            .get("confidence")
-            .and_then(Value::as_f64)
+        part_confidence: f64_json_any(value, &["partConfidence", "part_confidence", "confidence"])
             .unwrap_or_default(),
         from_gnn_prior: get_any(value, &["fromGnnPrior", "from_gnn_prior"])
             .and_then(Value::as_bool)
             .unwrap_or_default(),
-        reviewer_note: string_json_any(value, &["reviewerNote", "reviewer_note"]),
+        moderator_notes: string_json_any(
+            value,
+            &[
+                "moderatorNotes",
+                "moderator_notes",
+                "reviewerNote",
+                "reviewer_note",
+            ],
+        ),
         coverage_quality: get_any(value, &["coverageQuality", "coverage_quality"])
             .and_then(Value::as_f64)
             .unwrap_or_default(),
         gnn_version: string_json_any(value, &["gnnVersion", "gnn_version"]),
+        per_source_confidences: get_any(value, &["perSourceConfidences", "per_source_confidences"])
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_f64).collect())
+            .unwrap_or_default(),
+        moderator_overridden: get_any(value, &["moderatorOverridden", "moderator_overridden"])
+            .and_then(Value::as_bool)
+            .unwrap_or_default(),
+        moderator_overridden_at_ms: i64_json_any(
+            value,
+            &["moderatorOverriddenAtMs", "moderator_overridden_at_ms"],
+        ),
+        has_source_conflict: get_any(value, &["hasSourceConflict", "has_source_conflict"])
+            .and_then(Value::as_bool)
+            .unwrap_or_default(),
+        correction: get_any(value, &["correction"]).map(correction_from_json),
+    }
+}
+
+fn correction_from_json(value: &Value) -> ProvenanceCorrection {
+    ProvenanceCorrection {
+        correction_id: string_json_any(value, &["correctionId", "correction_id"]),
+        correction_type: string_json_any(value, &["correctionType", "correction_type"]),
+        correction_reasoning: string_json_any(
+            value,
+            &["correctionReasoning", "correction_reasoning"],
+        ),
+        correction_approved_at_ms: i64_json_any(
+            value,
+            &["correctionApprovedAtMs", "correction_approved_at_ms"],
+        ),
+    }
+}
+
+fn texture_provenance_from_json(value: &Value) -> TextureProvenance {
+    TextureProvenance {
+        texture_source: string_json_any(value, &["textureSource", "texture_source"]),
+        lora_archetype: string_json_any(value, &["loraArchetype", "lora_archetype"]),
+        lora_weight: f64_json_any(value, &["loraWeight", "lora_weight"]),
+        controlnet_conditioning_source: string_json_any(
+            value,
+            &[
+                "controlnetConditioningSource",
+                "controlnet_conditioning_source",
+            ],
+        ),
+        texture_confidence: f64_json_any(value, &["textureConfidence", "texture_confidence"]),
     }
 }
 
@@ -948,6 +1132,14 @@ fn get_any<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
     keys.iter().find_map(|key| value.get(*key))
 }
 
+fn i64_json_any(value: &Value, keys: &[&str]) -> Option<i64> {
+    get_any(value, keys).and_then(Value::as_i64)
+}
+
+fn f64_json_any(value: &Value, keys: &[&str]) -> Option<f64> {
+    get_any(value, keys).and_then(Value::as_f64)
+}
+
 fn validate_spec_identity(spec: &ReconstructionSpec) -> Result<(), Status> {
     if spec.spec_id.trim().is_empty() {
         return Err(Status::invalid_argument("spec_id is required"));
@@ -958,7 +1150,7 @@ fn validate_spec_identity(spec: &ReconstructionSpec) -> Result<(), Status> {
     if spec.title.trim().is_empty() {
         return Err(Status::invalid_argument("title is required"));
     }
-    if spec.version == 0 {
+    if spec.spec_version == 0 {
         return Err(Status::invalid_argument("version is required"));
     }
     Ok(())
@@ -1031,10 +1223,10 @@ mod tests {
             civic_object_id: "building:ct-001".to_string(),
             building_id: Uuid::nil().to_string(),
             title: "Carriage Town storefront".to_string(),
-            version: 1,
+            spec_version: 1,
             mass: Some(Mass {
                 provenance: Some(PartProvenance {
-                    confidence: 0.8,
+                    part_confidence: 0.8,
                     sources: vec![ReconstructionSource {
                         source_id: "photo:1".to_string(),
                         ..Default::default()
@@ -1046,11 +1238,11 @@ mod tests {
             }),
             roof: Some(Roof {
                 provenance: Some(PartProvenance {
-                    confidence: 0.35,
+                    part_confidence: 0.35,
                     from_gnn_prior: true,
                     ..Default::default()
                 }),
-                form: "flat".to_string(),
+                roof_type: "flat".to_string(),
                 ..Default::default()
             }),
             ..Default::default()

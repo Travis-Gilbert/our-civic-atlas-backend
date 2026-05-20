@@ -11,9 +11,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use anyhow::{anyhow, ensure, Context, Result};
 use async_trait::async_trait;
 use civic_atlas_types::civic_atlas::v1::{
-    CivicObject, DimensionRange, Facade, GroundFloor, Mass, OpeningGrid, Ornament, PartProvenance,
-    ReconstructionAsset, ReconstructionSource, ReconstructionSourceType, ReconstructionSpec,
-    ReconstructionSpecStatus, Roof, TenantContext, TimeSlice,
+    CivicObject, DimensionRange, Facade, GroundFloor, Mass, OpeningGrid, OpeningOverride, Ornament,
+    PartProvenance, ProvenanceCorrection, ReconstructionAsset, ReconstructionSource,
+    ReconstructionSourceType, ReconstructionSpec, ReconstructionSpecStatus, Roof, TenantContext,
+    TextureProvenance, TimeSlice,
 };
 use civic_atlas_types::theseus_bridge::v1::BatchSpacetimeEmbeddingRequest;
 use serde::{Deserialize, Serialize};
@@ -234,6 +235,65 @@ pub struct EdgeRelationshipConfidence {
     pub model_version: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconstructionNodeType {
+    Site,
+    Building,
+    Level,
+    Mass,
+    Facade,
+    OpeningGrid,
+    GroundFloor,
+    Roof,
+    Ornament,
+    TextureFace,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconstructionNodeMetadata {
+    pub spec_id: String,
+    pub civic_object_id: String,
+    pub building_id: String,
+    pub field_path: String,
+    pub label: String,
+    pub source_ids: Vec<String>,
+    pub confidence: Option<f64>,
+    pub editable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconstructionSceneNode {
+    pub id: String,
+    pub node_type: ReconstructionNodeType,
+    pub parent_id: Option<String>,
+    pub children: Vec<String>,
+    pub visible: bool,
+    pub metadata: ReconstructionNodeMetadata,
+    pub data: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconstructionNodeTree {
+    pub version: u32,
+    pub source: String,
+    pub root_node_ids: Vec<String>,
+    pub nodes: BTreeMap<String, ReconstructionSceneNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextureProvenanceProjection {
+    pub texture_source: String,
+    pub lora_archetype: Option<String>,
+    pub lora_weight: Option<f64>,
+    pub conditioning_source_id: Option<String>,
+    pub texture_confidence: Option<f64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeConflict {
@@ -419,9 +479,9 @@ pub fn extract_direct(
             } => {
                 if let Some(story_count) = story_count {
                     match spec.mass.as_mut() {
-                        Some(mass) if mass.story_count == 0 => {
-                            mass.story_count = *story_count;
-                            populated_fields.push("mass.story_count".to_string());
+                        Some(mass) if mass.stories == 0 => {
+                            mass.stories = *story_count;
+                            populated_fields.push("mass.stories".to_string());
                         }
                         None => {
                             spec.mass = Some(Mass {
@@ -432,10 +492,10 @@ pub fn extract_direct(
                                     "sanborn polygon/notation",
                                 )),
                                 form: "mapped footprint".to_string(),
-                                story_count: *story_count,
+                                stories: *story_count,
                                 ..Default::default()
                             });
-                            populated_fields.push("mass.story_count".to_string());
+                            populated_fields.push("mass.stories".to_string());
                         }
                         Some(_) => {}
                     }
@@ -443,8 +503,8 @@ pub fn extract_direct(
                 if spec.facades.is_empty() {
                     spec.facades.push(Facade {
                         provenance: Some(provenance(artifact, 0.9, false, "sanborn color code")),
-                        orientation: "primary".to_string(),
-                        material: material_code
+                        facade_side: "primary".to_string(),
+                        primary_material: material_code
                             .as_deref()
                             .map(sanborn_material)
                             .unwrap_or("unknown")
@@ -452,7 +512,7 @@ pub fn extract_direct(
                         color: material_code.clone().unwrap_or_default(),
                         ..Default::default()
                     });
-                    populated_fields.push("facades[0].material".to_string());
+                    populated_fields.push("facades[0].primary_material".to_string());
                 }
                 if let Some(roof_form) = roof_form.as_ref().filter(|value| !value.is_empty()) {
                     spec.roof = Some(Roof {
@@ -462,10 +522,10 @@ pub fn extract_direct(
                             false,
                             "sanborn roof notation",
                         )),
-                        form: roof_form.clone(),
+                        roof_type: roof_form.clone(),
                         ..Default::default()
                     });
-                    populated_fields.push("roof.form".to_string());
+                    populated_fields.push("roof.roof_type".to_string());
                 }
                 if spec.ground_floor.is_none()
                     && notation
@@ -504,7 +564,7 @@ pub fn extract_direct(
                             "photo scale/story count",
                         )),
                         form: "photo-observed mass".to_string(),
-                        story_count: story_count.unwrap_or_default(),
+                        stories: story_count.unwrap_or_default(),
                         height,
                         ..Default::default()
                     });
@@ -512,7 +572,7 @@ pub fn extract_direct(
                         populated_fields.push("mass.height".to_string());
                     }
                     if story_count.is_some() {
-                        populated_fields.push("mass.story_count".to_string());
+                        populated_fields.push("mass.stories".to_string());
                     }
                 } else if let Some(mass) = spec.mass.as_mut() {
                     if mass.height.is_none() {
@@ -521,10 +581,10 @@ pub fn extract_direct(
                             populated_fields.push("mass.height".to_string());
                         }
                     }
-                    if mass.story_count == 0 {
+                    if mass.stories == 0 {
                         if let Some(story_count) = story_count {
-                            mass.story_count = *story_count;
-                            populated_fields.push("mass.story_count".to_string());
+                            mass.stories = *story_count;
+                            populated_fields.push("mass.stories".to_string());
                         }
                     }
                 }
@@ -542,14 +602,13 @@ pub fn extract_direct(
                         )),
                         bay_count: bay_count.unwrap_or_default(),
                         floor_count: story_count.unwrap_or_default(),
-                        rhythm: "photo-observed".to_string(),
-                        opening_type: "window".to_string(),
+                        window_pattern: "photo_observed".to_string(),
                         ..Default::default()
                     };
                     if spec.facades.is_empty() {
                         spec.facades.push(Facade {
                             provenance: Some(provenance(artifact, 0.72, false, "photo facade")),
-                            orientation,
+                            facade_side: orientation,
                             opening_grids: vec![grid],
                             ..Default::default()
                         });
@@ -561,10 +620,10 @@ pub fn extract_direct(
                 if let Some(roof_form) = roof_form.as_ref().filter(|value| !value.is_empty()) {
                     spec.roof = Some(Roof {
                         provenance: Some(provenance(artifact, 0.82, false, "photo roofline")),
-                        form: roof_form.clone(),
+                        roof_type: roof_form.clone(),
                         ..Default::default()
                     });
-                    populated_fields.push("roof.form".to_string());
+                    populated_fields.push("roof.roof_type".to_string());
                 }
             }
             DecodedArtifact::DirectoryEntry { use_type, .. } => {
@@ -582,7 +641,7 @@ pub fn extract_direct(
                     spec.ornaments.push(Ornament {
                         provenance: Some(provenance(artifact, 0.7, false, "source text mention")),
                         ornament_id: "cornice".to_string(),
-                        kind: "cornice".to_string(),
+                        ornament_kind: "cornice".to_string(),
                         location: "roofline".to_string(),
                         ..Default::default()
                     });
@@ -725,7 +784,7 @@ pub fn merge_evidence_prior(
     merged.parcel_id = direct.spec.parcel_id.clone();
     merged.block_id = direct.spec.block_id.clone();
     merged.title = direct.spec.title.clone();
-    merged.version = direct.spec.version.max(1);
+    merged.spec_version = direct.spec.spec_version.max(1);
     merged.created_by = direct.spec.created_by.clone();
     merged.status = ReconstructionSpecStatus::Draft as i32;
 
@@ -735,9 +794,9 @@ pub fn merge_evidence_prior(
         if let Some(prior_mass) = prior.spec.mass.as_ref() {
             detect_u32_conflict(
                 &mut conflicts,
-                "mass.story_count",
-                direct_mass.story_count,
-                prior_mass.story_count,
+                "mass.stories",
+                direct_mass.stories,
+                prior_mass.stories,
                 confidence(direct_mass.provenance.as_ref()),
                 config.low_confidence_threshold,
             );
@@ -757,9 +816,9 @@ pub fn merge_evidence_prior(
         if let Some(prior_roof) = prior.spec.roof.as_ref() {
             detect_string_conflict(
                 &mut conflicts,
-                "roof.form",
-                &direct_roof.form,
-                &prior_roof.form,
+                "roof.roof_type",
+                &direct_roof.roof_type,
+                &prior_roof.roof_type,
                 confidence(direct_roof.provenance.as_ref()),
                 config.low_confidence_threshold,
             );
@@ -841,21 +900,21 @@ impl PriorModel for PairformerCivicPriorModel {
         let story_count = mode_u32(
             neighbor_specs
                 .iter()
-                .filter_map(|spec| spec.mass.as_ref().map(|mass| mass.story_count))
+                .filter_map(|spec| spec.mass.as_ref().map(|mass| mass.stories))
                 .filter(|count| *count > 0),
         )
         .unwrap_or(2);
         let material = mode_string(neighbor_specs.iter().flat_map(|spec| {
             spec.facades
                 .iter()
-                .map(|facade| facade.material.as_str())
+                .map(|facade| facade.primary_material.as_str())
                 .filter(|value| !value.is_empty())
         }))
         .unwrap_or_else(|| "brick".to_string());
         let roof_form = mode_string(
             neighbor_specs
                 .iter()
-                .filter_map(|spec| spec.roof.as_ref().map(|roof| roof.form.as_str()))
+                .filter_map(|spec| spec.roof.as_ref().map(|roof| roof.roof_type.as_str()))
                 .filter(|value| !value.is_empty()),
         )
         .unwrap_or_else(|| {
@@ -878,7 +937,7 @@ impl PriorModel for PairformerCivicPriorModel {
             spec.mass = Some(Mass {
                 provenance: Some(prior_provenance(&self.model_version, 0.54)),
                 form: "block-coherent mass".to_string(),
-                story_count,
+                stories: story_count,
                 height: Some(DimensionRange {
                     min: Some((story_count as f64) * 2.8),
                     max: Some((story_count as f64) * 3.7),
@@ -890,14 +949,13 @@ impl PriorModel for PairformerCivicPriorModel {
         if spec.facades.is_empty() {
             spec.facades.push(Facade {
                 provenance: Some(prior_provenance(&self.model_version, 0.51)),
-                orientation: "primary".to_string(),
-                material,
+                facade_side: "primary".to_string(),
+                primary_material: material,
                 opening_grids: vec![OpeningGrid {
                     provenance: Some(prior_provenance(&self.model_version, 0.48)),
                     bay_count,
                     floor_count: story_count,
-                    rhythm: "block-coherent".to_string(),
-                    opening_type: "window".to_string(),
+                    window_pattern: "block_coherent".to_string(),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -906,8 +964,8 @@ impl PriorModel for PairformerCivicPriorModel {
         if spec.roof.is_none() {
             spec.roof = Some(Roof {
                 provenance: Some(prior_provenance(&self.model_version, 0.47)),
-                form: roof_form,
-                material: "era-typology prior".to_string(),
+                roof_type: roof_form,
+                roof_material: "era-typology prior".to_string(),
                 ..Default::default()
             });
         }
@@ -915,7 +973,7 @@ impl PriorModel for PairformerCivicPriorModel {
             let use_type = if spec
                 .facades
                 .first()
-                .map(|facade| facade.material.contains("brick"))
+                .map(|facade| facade.primary_material.contains("brick"))
                 .unwrap_or(false)
             {
                 "commercial"
@@ -938,9 +996,9 @@ impl PriorModel for PairformerCivicPriorModel {
             spec.ornaments.push(Ornament {
                 provenance: Some(prior_provenance(&self.model_version, 0.32)),
                 ornament_id: "none-observed".to_string(),
-                kind: "none observed".to_string(),
+                ornament_kind: "none observed".to_string(),
                 location: String::new(),
-                material: String::new(),
+                ornament_material: String::new(),
                 ..Default::default()
             });
         }
@@ -1082,12 +1140,12 @@ impl Default for SceneFoundryManifestGenerator {
 impl AssetGenerator for SceneFoundryManifestGenerator {
     async fn generate(&self, merged: &MergedReconstructionSpec) -> Result<AssetManifest> {
         let spec = &merged.spec;
-        let manifest_id = format!("scene-foundry:{}:v{}", spec.spec_id, spec.version);
+        let manifest_id = format!("scene-foundry:{}:v{}", spec.spec_id, spec.spec_version);
         let uri = format!(
             "{}/{}/v{}/manifest.json",
             self.uri_prefix.trim_end_matches('/'),
             spec.spec_id,
-            spec.version
+            spec.spec_version
         );
         let mut metadata = BTreeMap::new();
         metadata.insert("generator".to_string(), "scene_foundry".to_string());
@@ -1105,7 +1163,7 @@ impl AssetGenerator for SceneFoundryManifestGenerator {
         Ok(AssetManifest {
             manifest_id,
             spec_id: spec.spec_id.clone(),
-            spec_version: spec.version,
+            spec_version: spec.spec_version,
             fidelity_tier: fidelity_tier(spec).to_string(),
             generator: "scene_foundry".to_string(),
             status: "queued".to_string(),
@@ -1351,7 +1409,7 @@ fn base_spec(request: &ReconstructionRequest, focus: Option<&CivicObject>) -> Re
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| format!("Reconstruction {}", request.parcel_id)),
         status: ReconstructionSpecStatus::Draft as i32,
-        version: 1,
+        spec_version: 1,
         created_by: request.requested_by.clone(),
         metadata,
         ..Default::default()
@@ -1366,9 +1424,9 @@ fn provenance(
 ) -> PartProvenance {
     PartProvenance {
         sources: vec![artifact.source()],
-        confidence,
+        part_confidence: confidence,
         from_gnn_prior,
-        reviewer_note: note.to_string(),
+        moderator_notes: note.to_string(),
         coverage_quality: confidence,
         ..Default::default()
     }
@@ -1387,7 +1445,7 @@ fn system_provenance(
             title: title.to_string(),
             ..Default::default()
         }],
-        confidence,
+        part_confidence: confidence,
         from_gnn_prior,
         coverage_quality: confidence,
         ..Default::default()
@@ -1402,7 +1460,7 @@ fn prior_provenance(model_version: &str, confidence: f64) -> PartProvenance {
             title: "Block-coherent prior".to_string(),
             ..Default::default()
         }],
-        confidence,
+        part_confidence: confidence,
         from_gnn_prior: true,
         coverage_quality: confidence,
         gnn_version: model_version.to_string(),
@@ -1466,8 +1524,8 @@ fn merge_mass(direct: &Mass, prior: Option<&Mass>, model_version: &str) -> Mass 
     if !direct.form.is_empty() {
         merged.form = direct.form.clone();
     }
-    if direct.story_count > 0 {
-        merged.story_count = direct.story_count;
+    if direct.stories > 0 {
+        merged.stories = direct.stories;
     }
     if direct.height.is_some() {
         merged.height = direct.height.clone();
@@ -1491,11 +1549,11 @@ fn merge_facades(direct: &[Facade], prior: &[Facade]) -> Vec<Facade> {
         .enumerate()
         .map(|(index, direct_facade)| {
             let mut merged = prior.get(index).cloned().unwrap_or_default();
-            if !direct_facade.orientation.is_empty() {
-                merged.orientation = direct_facade.orientation.clone();
+            if !direct_facade.facade_side.is_empty() {
+                merged.facade_side = direct_facade.facade_side.clone();
             }
-            if !direct_facade.material.is_empty() {
-                merged.material = direct_facade.material.clone();
+            if !direct_facade.primary_material.is_empty() {
+                merged.primary_material = direct_facade.primary_material.clone();
             }
             if !direct_facade.color.is_empty() {
                 merged.color = direct_facade.color.clone();
@@ -1514,11 +1572,11 @@ fn merge_facades(direct: &[Facade], prior: &[Facade]) -> Vec<Facade> {
 
 fn merge_roof(direct: &Roof, prior: Option<&Roof>) -> Roof {
     let mut merged = prior.cloned().unwrap_or_default();
-    if !direct.form.is_empty() {
-        merged.form = direct.form.clone();
+    if !direct.roof_type.is_empty() {
+        merged.roof_type = direct.roof_type.clone();
     }
-    if !direct.material.is_empty() {
-        merged.material = direct.material.clone();
+    if !direct.roof_material.is_empty() {
+        merged.roof_material = direct.roof_material.clone();
     }
     if direct.pitch_degrees.is_some() {
         merged.pitch_degrees = direct.pitch_degrees;
@@ -1541,8 +1599,8 @@ fn merge_ground_floor(direct: &GroundFloor, prior: Option<&GroundFloor>) -> Grou
     if !direct.entry_location.is_empty() {
         merged.entry_location = direct.entry_location.clone();
     }
-    if direct.has_awning {
-        merged.has_awning = true;
+    if direct.has_canopy {
+        merged.has_canopy = true;
     }
     if direct.provenance.is_some() {
         merged.provenance = direct.provenance.clone();
@@ -1592,7 +1650,9 @@ fn detect_u32_conflict(
 }
 
 fn confidence(provenance: Option<&PartProvenance>) -> f64 {
-    provenance.map(|item| item.confidence).unwrap_or_default()
+    provenance
+        .map(|item| item.part_confidence)
+        .unwrap_or_default()
 }
 
 fn mode_string<'a>(values: impl IntoIterator<Item = &'a str>) -> Option<String> {
@@ -1860,10 +1920,15 @@ fn spec_from_json(value: &Value) -> ReconstructionSpec {
         parcel_id: string_any(value, &["parcelId", "parcel_id"]),
         block_id: string_any(value, &["blockId", "block_id"]),
         title: string_any(value, &["title"]),
-        version: value.get("version").and_then(Value::as_u64).unwrap_or(1) as u32,
+        spec_version: u32_any(value, &["specVersion", "spec_version", "version"]).unwrap_or(1),
         mass: value.get("mass").map(|mass| Mass {
             form: string_any(mass, &["form"]),
-            story_count: u32_any(mass, &["storyCount", "story_count"]).unwrap_or_default(),
+            stories: u32_any(mass, &["stories", "storyCount", "story_count"]).unwrap_or_default(),
+            part_id: string_any(mass, &["partId", "part_id"]),
+            footprint_geometry_id: string_any(
+                mass,
+                &["footprintGeometryId", "footprint_geometry_id"],
+            ),
             provenance: mass.get("provenance").map(provenance_from_json),
             ..Default::default()
         }),
@@ -1874,8 +1939,14 @@ fn spec_from_json(value: &Value) -> ReconstructionSpec {
                 facades
                     .iter()
                     .map(|facade| Facade {
-                        orientation: string_any(facade, &["orientation"]),
-                        material: string_any(facade, &["material"]),
+                        facade_side: string_any(
+                            facade,
+                            &["facadeSide", "facade_side", "orientation"],
+                        ),
+                        primary_material: string_any(
+                            facade,
+                            &["primaryMaterial", "primary_material", "material"],
+                        ),
                         color: string_any(facade, &["color"]),
                         opening_grids: facade
                             .get("openingGrids")
@@ -1884,15 +1955,24 @@ fn spec_from_json(value: &Value) -> ReconstructionSpec {
                             .map(|grids| grids.iter().map(opening_grid_from_json).collect())
                             .unwrap_or_default(),
                         provenance: facade.get("provenance").map(provenance_from_json),
+                        part_id: string_any(facade, &["partId", "part_id"]),
+                        texture_provenance: facade
+                            .get("textureProvenance")
+                            .or_else(|| facade.get("texture_provenance"))
+                            .map(texture_provenance_from_json),
                         ..Default::default()
                     })
                     .collect()
             })
             .unwrap_or_default(),
         roof: value.get("roof").map(|roof| Roof {
-            form: string_any(roof, &["form"]),
-            material: string_any(roof, &["material"]),
+            roof_type: string_any(roof, &["roofType", "roof_type", "form"]),
+            roof_material: string_any(roof, &["roofMaterial", "roof_material", "material"]),
             provenance: roof.get("provenance").map(provenance_from_json),
+            texture_provenance: roof
+                .get("textureProvenance")
+                .or_else(|| roof.get("texture_provenance"))
+                .map(texture_provenance_from_json),
             ..Default::default()
         }),
         ground_floor: value
@@ -1901,18 +1981,38 @@ fn spec_from_json(value: &Value) -> ReconstructionSpec {
             .map(|ground_floor| GroundFloor {
                 use_type: string_any(ground_floor, &["useType", "use_type"]),
                 storefront_type: string_any(ground_floor, &["storefrontType", "storefront_type"]),
+                entry_location: string_any(ground_floor, &["entryLocation", "entry_location"]),
+                has_canopy: ground_floor
+                    .get("hasCanopy")
+                    .or_else(|| ground_floor.get("has_canopy"))
+                    .or_else(|| ground_floor.get("hasAwning"))
+                    .or_else(|| ground_floor.get("has_awning"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or_default(),
                 provenance: ground_floor.get("provenance").map(provenance_from_json),
+                part_id: string_any(ground_floor, &["partId", "part_id"]),
+                texture_provenance: ground_floor
+                    .get("textureProvenance")
+                    .or_else(|| ground_floor.get("texture_provenance"))
+                    .map(texture_provenance_from_json),
                 ..Default::default()
             }),
+        t_start_ms: i64_any(value, &["tStartMs", "t_start_ms"]),
+        t_end_ms: i64_any(value, &["tEndMs", "t_end_ms"]),
+        archetype_classification: string_any(
+            value,
+            &["archetypeClassification", "archetype_classification"],
+        ),
+        gnn_version: string_any(value, &["gnnVersion", "gnn_version"]),
+        published_at_ms: i64_any(value, &["publishedAtMs", "published_at_ms"]),
+        license: string_any(value, &["license"]),
         ..Default::default()
     }
 }
 
 fn provenance_from_json(value: &Value) -> PartProvenance {
     PartProvenance {
-        confidence: value
-            .get("confidence")
-            .and_then(Value::as_f64)
+        part_confidence: f64_any(value, &["partConfidence", "part_confidence", "confidence"])
             .unwrap_or_default(),
         from_gnn_prior: value
             .get("fromGnnPrior")
@@ -1920,6 +2020,38 @@ fn provenance_from_json(value: &Value) -> PartProvenance {
             .and_then(Value::as_bool)
             .unwrap_or_default(),
         gnn_version: string_any(value, &["gnnVersion", "gnn_version"]),
+        moderator_notes: string_any(
+            value,
+            &[
+                "moderatorNotes",
+                "moderator_notes",
+                "reviewerNote",
+                "reviewer_note",
+            ],
+        ),
+        coverage_quality: f64_any(value, &["coverageQuality", "coverage_quality"])
+            .unwrap_or_default(),
+        per_source_confidences: value
+            .get("perSourceConfidences")
+            .or_else(|| value.get("per_source_confidences"))
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_f64).collect())
+            .unwrap_or_default(),
+        moderator_overridden: value
+            .get("moderatorOverridden")
+            .or_else(|| value.get("moderator_overridden"))
+            .and_then(Value::as_bool)
+            .unwrap_or_default(),
+        moderator_overridden_at_ms: i64_any(
+            value,
+            &["moderatorOverriddenAtMs", "moderator_overridden_at_ms"],
+        ),
+        has_source_conflict: value
+            .get("hasSourceConflict")
+            .or_else(|| value.get("has_source_conflict"))
+            .and_then(Value::as_bool)
+            .unwrap_or_default(),
+        correction: value.get("correction").map(correction_from_json),
         ..Default::default()
     }
 }
@@ -1928,13 +2060,73 @@ fn opening_grid_from_json(value: &Value) -> OpeningGrid {
     OpeningGrid {
         bay_count: u32_any(value, &["bayCount", "bay_count"]).unwrap_or_default(),
         floor_count: u32_any(value, &["floorCount", "floor_count"]).unwrap_or_default(),
-        rhythm: string_any(value, &["rhythm"]),
-        opening_type: string_any(value, &["openingType", "opening_type"]),
+        window_pattern: string_any(
+            value,
+            &[
+                "windowPattern",
+                "window_pattern",
+                "rhythm",
+                "openingType",
+                "opening_type",
+            ],
+        ),
         provenance: value.get("provenance").map(provenance_from_json),
+        opening_overrides: value
+            .get("openingOverrides")
+            .or_else(|| value.get("opening_overrides"))
+            .and_then(Value::as_array)
+            .map(|items| items.iter().map(opening_override_from_json).collect())
+            .unwrap_or_default(),
         attributes: value
             .get("attributes")
             .map(json_to_string_map)
             .unwrap_or_default(),
+        part_id: string_any(value, &["partId", "part_id"]),
+        has_storefront_ground: value
+            .get("hasStorefrontGround")
+            .or_else(|| value.get("has_storefront_ground"))
+            .and_then(Value::as_bool)
+            .unwrap_or_default(),
+    }
+}
+
+fn opening_override_from_json(value: &Value) -> OpeningOverride {
+    OpeningOverride {
+        bay_index: u32_any(value, &["bayIndex", "bay_index"]).unwrap_or_default(),
+        override_kind: string_any(value, &["overrideKind", "override_kind"]),
+        override_pattern: string_any(value, &["overridePattern", "override_pattern"]),
+        override_provenance: value
+            .get("overrideProvenance")
+            .or_else(|| value.get("override_provenance"))
+            .map(provenance_from_json),
+    }
+}
+
+fn correction_from_json(value: &Value) -> ProvenanceCorrection {
+    ProvenanceCorrection {
+        correction_id: string_any(value, &["correctionId", "correction_id"]),
+        correction_type: string_any(value, &["correctionType", "correction_type"]),
+        correction_reasoning: string_any(value, &["correctionReasoning", "correction_reasoning"]),
+        correction_approved_at_ms: i64_any(
+            value,
+            &["correctionApprovedAtMs", "correction_approved_at_ms"],
+        ),
+    }
+}
+
+fn texture_provenance_from_json(value: &Value) -> TextureProvenance {
+    TextureProvenance {
+        texture_source: string_any(value, &["textureSource", "texture_source"]),
+        lora_archetype: string_any(value, &["loraArchetype", "lora_archetype"]),
+        lora_weight: f64_any(value, &["loraWeight", "lora_weight"]),
+        controlnet_conditioning_source: string_any(
+            value,
+            &[
+                "controlnetConditioningSource",
+                "controlnet_conditioning_source",
+            ],
+        ),
+        texture_confidence: f64_any(value, &["textureConfidence", "texture_confidence"]),
     }
 }
 
@@ -1990,6 +2182,12 @@ fn f64_any(value: &Value, keys: &[&str]) -> Option<f64> {
         .and_then(Value::as_f64)
 }
 
+fn i64_any(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|key| value.get(*key))
+        .and_then(Value::as_i64)
+}
+
 fn stable_id_fragment(value: &str) -> String {
     value
         .chars()
@@ -2003,6 +2201,153 @@ fn stable_id_fragment(value: &str) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_string()
+}
+
+fn reconstruction_node_id(spec: &ReconstructionSpec, field_path: &str) -> String {
+    format!(
+        "reconstruction-node:{}:{}",
+        stable_id_fragment(&spec.spec_id),
+        stable_id_fragment(field_path)
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconstruction_node(
+    spec: &ReconstructionSpec,
+    id: String,
+    node_type: ReconstructionNodeType,
+    parent_id: Option<String>,
+    field_path: &str,
+    label: &str,
+    provenance: Option<&PartProvenance>,
+    children: Vec<String>,
+    data: Value,
+    editable: bool,
+) -> ReconstructionSceneNode {
+    ReconstructionSceneNode {
+        id,
+        node_type,
+        parent_id,
+        children,
+        visible: true,
+        metadata: ReconstructionNodeMetadata {
+            spec_id: spec.spec_id.clone(),
+            civic_object_id: spec.civic_object_id.clone(),
+            building_id: spec.building_id.clone(),
+            field_path: field_path.to_string(),
+            label: label.to_string(),
+            source_ids: source_ids_from_provenance(provenance),
+            confidence: provenance.map(|item| item.part_confidence),
+            editable,
+        },
+        data,
+    }
+}
+
+fn texture_face_node(
+    spec: &ReconstructionSpec,
+    id: String,
+    parent_id: String,
+    field_path: &str,
+    label: &str,
+    target_part: &str,
+    texture_provenance: Option<&TextureProvenance>,
+    attributes: &HashMap<String, String>,
+) -> ReconstructionSceneNode {
+    let texture = texture_provenance_projection(texture_provenance, attributes);
+    reconstruction_node(
+        spec,
+        id,
+        ReconstructionNodeType::TextureFace,
+        Some(parent_id),
+        field_path,
+        label,
+        None,
+        Vec::new(),
+        json!({
+            "targetPart": target_part,
+            "textureProvenance": texture,
+        }),
+        false,
+    )
+}
+
+fn texture_provenance_projection(
+    texture_provenance: Option<&TextureProvenance>,
+    attributes: &HashMap<String, String>,
+) -> TextureProvenanceProjection {
+    let fallback = texture_provenance_from_attributes(attributes);
+    let Some(texture) = texture_provenance else {
+        return fallback;
+    };
+
+    TextureProvenanceProjection {
+        texture_source: non_empty_string(&texture.texture_source)
+            .unwrap_or(fallback.texture_source),
+        lora_archetype: non_empty_string(&texture.lora_archetype).or(fallback.lora_archetype),
+        lora_weight: texture.lora_weight.or(fallback.lora_weight),
+        conditioning_source_id: non_empty_string(&texture.controlnet_conditioning_source)
+            .or(fallback.conditioning_source_id),
+        texture_confidence: texture.texture_confidence.or(fallback.texture_confidence),
+    }
+}
+
+fn texture_provenance_from_attributes(
+    attributes: &HashMap<String, String>,
+) -> TextureProvenanceProjection {
+    TextureProvenanceProjection {
+        texture_source: attributes
+            .get("texture_source")
+            .cloned()
+            .unwrap_or_else(|| "untextured".to_string()),
+        lora_archetype: attributes.get("lora_archetype").cloned(),
+        lora_weight: attributes
+            .get("lora_weight")
+            .and_then(|value| value.parse::<f64>().ok()),
+        conditioning_source_id: attributes
+            .get("controlnet_conditioning_source")
+            .or_else(|| attributes.get("conditioning_source_id"))
+            .cloned(),
+        texture_confidence: attributes
+            .get("texture_confidence")
+            .and_then(|value| value.parse::<f64>().ok()),
+    }
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn source_ids_from_provenance(provenance: Option<&PartProvenance>) -> Vec<String> {
+    provenance
+        .map(|item| {
+            item.sources
+                .iter()
+                .map(|source| source.source_id.clone())
+                .filter(|source_id| !source_id.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn facade_label(facade: &Facade, index: usize) -> String {
+    if facade.facade_side.is_empty() {
+        format!("Facade {}", index + 1)
+    } else {
+        format!("{} facade", facade.facade_side)
+    }
+}
+
+fn ornament_label(ornament: &Ornament, index: usize) -> String {
+    if ornament.ornament_kind.is_empty() {
+        format!("Ornament {}", index + 1)
+    } else {
+        ornament.ornament_kind.clone()
+    }
 }
 
 async fn set_transaction_tenant(tx: &mut Transaction<'_, Postgres>, tenant_id: Uuid) -> Result<()> {
@@ -2106,6 +2451,294 @@ pub fn attach_manifest_to_spec(spec: &mut ReconstructionSpec, manifest: &AssetMa
         .collect();
 }
 
+pub fn reconstruction_spec_to_node_tree(spec: &ReconstructionSpec) -> ReconstructionNodeTree {
+    let root_id = reconstruction_node_id(spec, "site");
+    let building_id = reconstruction_node_id(spec, "building");
+    let level_id = reconstruction_node_id(spec, "level[0]");
+    let mut nodes = BTreeMap::new();
+    let mut level_children = Vec::new();
+
+    nodes.insert(
+        root_id.clone(),
+        reconstruction_node(
+            spec,
+            root_id.clone(),
+            ReconstructionNodeType::Site,
+            None,
+            "spec",
+            "Reconstruction site",
+            None,
+            vec![building_id.clone()],
+            json!({
+                "tenantId": spec
+                    .tenant_context
+                    .as_ref()
+                    .map(|tenant| tenant.tenant_id.as_str())
+                    .unwrap_or_default(),
+                "parcelId": &spec.parcel_id,
+                "blockId": &spec.block_id,
+            }),
+            false,
+        ),
+    );
+
+    nodes.insert(
+        building_id.clone(),
+        reconstruction_node(
+            spec,
+            building_id.clone(),
+            ReconstructionNodeType::Building,
+            Some(root_id.clone()),
+            "building",
+            if spec.title.is_empty() {
+                "Building"
+            } else {
+                spec.title.as_str()
+            },
+            None,
+            vec![level_id.clone()],
+            json!({
+                "title": &spec.title,
+                "status": spec.status,
+                "specVersion": spec.spec_version,
+                "civicObjectId": &spec.civic_object_id,
+                "buildingId": &spec.building_id,
+                "parcelId": &spec.parcel_id,
+                "blockId": &spec.block_id,
+            }),
+            true,
+        ),
+    );
+
+    if let Some(mass) = spec.mass.as_ref() {
+        let id = reconstruction_node_id(spec, "mass");
+        level_children.push(id.clone());
+        nodes.insert(
+            id.clone(),
+            reconstruction_node(
+                spec,
+                id,
+                ReconstructionNodeType::Mass,
+                Some(level_id.clone()),
+                "mass",
+                "Mass",
+                mass.provenance.as_ref(),
+                Vec::new(),
+                mass_to_json(mass),
+                true,
+            ),
+        );
+    }
+
+    for (facade_index, facade) in spec.facades.iter().enumerate() {
+        let facade_path = format!("facades[{facade_index}]");
+        let facade_id = reconstruction_node_id(spec, &facade_path);
+        let texture_path = format!("{facade_path}.texture");
+        let texture_id = reconstruction_node_id(spec, &texture_path);
+        let mut facade_children = Vec::new();
+        let label = facade_label(facade, facade_index);
+        level_children.push(facade_id.clone());
+
+        for (grid_index, grid) in facade.opening_grids.iter().enumerate() {
+            let grid_path = format!("{facade_path}.openingGrids[{grid_index}]");
+            let grid_id = reconstruction_node_id(spec, &grid_path);
+            facade_children.push(grid_id.clone());
+            nodes.insert(
+                grid_id.clone(),
+                reconstruction_node(
+                    spec,
+                    grid_id,
+                    ReconstructionNodeType::OpeningGrid,
+                    Some(facade_id.clone()),
+                    &grid_path,
+                    &format!("Opening grid {}", grid_index + 1),
+                    grid.provenance.as_ref(),
+                    Vec::new(),
+                    opening_grid_to_json(grid),
+                    true,
+                ),
+            );
+        }
+
+        facade_children.push(texture_id.clone());
+        nodes.insert(
+            texture_id.clone(),
+            texture_face_node(
+                spec,
+                texture_id,
+                facade_id.clone(),
+                &texture_path,
+                "Facade texture",
+                "facade",
+                facade.texture_provenance.as_ref(),
+                &facade.attributes,
+            ),
+        );
+        nodes.insert(
+            facade_id.clone(),
+            reconstruction_node(
+                spec,
+                facade_id,
+                ReconstructionNodeType::Facade,
+                Some(level_id.clone()),
+                &facade_path,
+                &label,
+                facade.provenance.as_ref(),
+                facade_children,
+                facade_to_json(facade),
+                true,
+            ),
+        );
+    }
+
+    if let Some(ground_floor) = spec.ground_floor.as_ref() {
+        let id = reconstruction_node_id(spec, "groundFloor");
+        let texture_id = reconstruction_node_id(spec, "groundFloor.texture");
+        level_children.push(id.clone());
+        nodes.insert(
+            texture_id.clone(),
+            texture_face_node(
+                spec,
+                texture_id.clone(),
+                id.clone(),
+                "groundFloor.texture",
+                "Ground-floor texture",
+                "groundFloor",
+                ground_floor.texture_provenance.as_ref(),
+                &ground_floor.attributes,
+            ),
+        );
+        nodes.insert(
+            id.clone(),
+            reconstruction_node(
+                spec,
+                id,
+                ReconstructionNodeType::GroundFloor,
+                Some(level_id.clone()),
+                "groundFloor",
+                "Ground floor",
+                ground_floor.provenance.as_ref(),
+                vec![texture_id],
+                ground_floor_to_json(ground_floor),
+                true,
+            ),
+        );
+    }
+
+    if let Some(roof) = spec.roof.as_ref() {
+        let id = reconstruction_node_id(spec, "roof");
+        let texture_id = reconstruction_node_id(spec, "roof.texture");
+        level_children.push(id.clone());
+        nodes.insert(
+            texture_id.clone(),
+            texture_face_node(
+                spec,
+                texture_id.clone(),
+                id.clone(),
+                "roof.texture",
+                "Roof texture",
+                "roof",
+                roof.texture_provenance.as_ref(),
+                &roof.attributes,
+            ),
+        );
+        nodes.insert(
+            id.clone(),
+            reconstruction_node(
+                spec,
+                id,
+                ReconstructionNodeType::Roof,
+                Some(level_id.clone()),
+                "roof",
+                "Roof",
+                roof.provenance.as_ref(),
+                vec![texture_id],
+                roof_to_json(roof),
+                true,
+            ),
+        );
+    }
+
+    for (ornament_index, ornament) in spec.ornaments.iter().enumerate() {
+        let ornament_path = format!("ornaments[{ornament_index}]");
+        let id = reconstruction_node_id(spec, &ornament_path);
+        let texture_path = format!("{ornament_path}.texture");
+        let texture_id = reconstruction_node_id(spec, &texture_path);
+        let label = ornament_label(ornament, ornament_index);
+        level_children.push(id.clone());
+        nodes.insert(
+            texture_id.clone(),
+            texture_face_node(
+                spec,
+                texture_id.clone(),
+                id.clone(),
+                &texture_path,
+                "Ornament texture",
+                "ornament",
+                ornament.texture_provenance.as_ref(),
+                &ornament.attributes,
+            ),
+        );
+        nodes.insert(
+            id.clone(),
+            reconstruction_node(
+                spec,
+                id,
+                ReconstructionNodeType::Ornament,
+                Some(level_id.clone()),
+                &ornament_path,
+                &label,
+                ornament.provenance.as_ref(),
+                vec![texture_id],
+                ornament_to_json(ornament),
+                true,
+            ),
+        );
+    }
+
+    nodes.insert(
+        level_id.clone(),
+        reconstruction_node(
+            spec,
+            level_id,
+            ReconstructionNodeType::Level,
+            Some(building_id),
+            "level[0]",
+            "Level 0",
+            None,
+            level_children,
+            json!({ "levelIndex": 0, "elevationMeters": 0.0 }),
+            false,
+        ),
+    );
+
+    ReconstructionNodeTree {
+        version: 1,
+        source: "ReconstructionSpec".to_string(),
+        root_node_ids: vec![root_id],
+        nodes,
+    }
+}
+
+pub fn reconstruction_node_path<'a>(
+    tree: &'a ReconstructionNodeTree,
+    node_id: &str,
+) -> Vec<&'a ReconstructionSceneNode> {
+    let mut path = Vec::new();
+    let mut current = tree.nodes.get(node_id);
+
+    while let Some(node) = current {
+        path.push(node);
+        current = node
+            .parent_id
+            .as_ref()
+            .and_then(|parent_id| tree.nodes.get(parent_id));
+    }
+
+    path.reverse();
+    path
+}
+
 pub fn reconstruction_spec_to_json(spec: &ReconstructionSpec) -> Value {
     json!({
         "tenantContext": spec.tenant_context.as_ref().map(|tenant| json!({
@@ -2120,7 +2753,13 @@ pub fn reconstruction_spec_to_json(spec: &ReconstructionSpec) -> Value {
         "blockId": &spec.block_id,
         "title": &spec.title,
         "status": spec_status_label(spec.status),
-        "version": spec.version,
+        "specVersion": spec.spec_version,
+        "tStartMs": spec.t_start_ms,
+        "tEndMs": spec.t_end_ms,
+        "archetypeClassification": &spec.archetype_classification,
+        "gnnVersion": &spec.gnn_version,
+        "publishedAtMs": spec.published_at_ms,
+        "license": &spec.license,
         "supersedesSpecId": &spec.supersedes_spec_id,
         "createdBy": &spec.created_by,
         "reviewedBy": &spec.reviewed_by,
@@ -2229,10 +2868,12 @@ fn mass_to_json(mass: &Mass) -> Value {
     json!({
         "provenance": mass.provenance.as_ref().map(provenance_to_json),
         "form": &mass.form,
-        "storyCount": mass.story_count,
+        "stories": mass.stories,
         "height": mass.height.as_ref().map(dimension_to_json),
         "width": mass.width.as_ref().map(dimension_to_json),
         "depth": mass.depth.as_ref().map(dimension_to_json),
+        "partId": &mass.part_id,
+        "footprintGeometryId": &mass.footprint_geometry_id,
         "attributes": &mass.attributes,
     })
 }
@@ -2240,10 +2881,12 @@ fn mass_to_json(mass: &Mass) -> Value {
 fn facade_to_json(facade: &Facade) -> Value {
     json!({
         "provenance": facade.provenance.as_ref().map(provenance_to_json),
-        "orientation": &facade.orientation,
-        "material": &facade.material,
+        "facadeSide": &facade.facade_side,
+        "primaryMaterial": &facade.primary_material,
         "color": &facade.color,
         "openingGrids": facade.opening_grids.iter().map(opening_grid_to_json).collect::<Vec<_>>(),
+        "partId": &facade.part_id,
+        "textureProvenance": facade.texture_provenance.as_ref().map(texture_provenance_to_json),
         "attributes": &facade.attributes,
     })
 }
@@ -2253,18 +2896,30 @@ fn opening_grid_to_json(grid: &OpeningGrid) -> Value {
         "provenance": grid.provenance.as_ref().map(provenance_to_json),
         "bayCount": grid.bay_count,
         "floorCount": grid.floor_count,
-        "rhythm": &grid.rhythm,
-        "openingType": &grid.opening_type,
+        "windowPattern": &grid.window_pattern,
+        "openingOverrides": grid.opening_overrides.iter().map(opening_override_to_json).collect::<Vec<_>>(),
+        "partId": &grid.part_id,
+        "hasStorefrontGround": grid.has_storefront_ground,
         "attributes": &grid.attributes,
+    })
+}
+
+fn opening_override_to_json(opening_override: &OpeningOverride) -> Value {
+    json!({
+        "bayIndex": opening_override.bay_index,
+        "overrideKind": &opening_override.override_kind,
+        "overridePattern": &opening_override.override_pattern,
+        "overrideProvenance": opening_override.override_provenance.as_ref().map(provenance_to_json),
     })
 }
 
 fn roof_to_json(roof: &Roof) -> Value {
     json!({
         "provenance": roof.provenance.as_ref().map(provenance_to_json),
-        "form": &roof.form,
-        "material": &roof.material,
+        "roofType": &roof.roof_type,
+        "roofMaterial": &roof.roof_material,
         "pitchDegrees": roof.pitch_degrees,
+        "textureProvenance": roof.texture_provenance.as_ref().map(texture_provenance_to_json),
         "attributes": &roof.attributes,
     })
 }
@@ -2273,9 +2928,11 @@ fn ornament_to_json(ornament: &Ornament) -> Value {
     json!({
         "provenance": ornament.provenance.as_ref().map(provenance_to_json),
         "ornamentId": &ornament.ornament_id,
-        "kind": &ornament.kind,
+        "ornamentKind": &ornament.ornament_kind,
         "location": &ornament.location,
-        "material": &ornament.material,
+        "ornamentMaterial": &ornament.ornament_material,
+        "ornamentStyle": &ornament.ornament_style,
+        "textureProvenance": ornament.texture_provenance.as_ref().map(texture_provenance_to_json),
         "attributes": &ornament.attributes,
     })
 }
@@ -2286,7 +2943,9 @@ fn ground_floor_to_json(ground_floor: &GroundFloor) -> Value {
         "useType": &ground_floor.use_type,
         "storefrontType": &ground_floor.storefront_type,
         "entryLocation": &ground_floor.entry_location,
-        "hasAwning": ground_floor.has_awning,
+        "hasCanopy": ground_floor.has_canopy,
+        "partId": &ground_floor.part_id,
+        "textureProvenance": ground_floor.texture_provenance.as_ref().map(texture_provenance_to_json),
         "attributes": &ground_floor.attributes,
     })
 }
@@ -2315,11 +2974,35 @@ fn provenance_to_json(provenance: &PartProvenance) -> Value {
             "citation": &source.citation,
             "metadata": &source.metadata,
         })).collect::<Vec<_>>(),
-        "confidence": provenance.confidence,
+        "partConfidence": provenance.part_confidence,
         "fromGnnPrior": provenance.from_gnn_prior,
-        "reviewerNote": &provenance.reviewer_note,
+        "moderatorNotes": &provenance.moderator_notes,
         "coverageQuality": provenance.coverage_quality,
         "gnnVersion": &provenance.gnn_version,
+        "perSourceConfidences": &provenance.per_source_confidences,
+        "moderatorOverridden": provenance.moderator_overridden,
+        "moderatorOverriddenAtMs": provenance.moderator_overridden_at_ms,
+        "hasSourceConflict": provenance.has_source_conflict,
+        "correction": provenance.correction.as_ref().map(correction_to_json),
+    })
+}
+
+fn correction_to_json(correction: &ProvenanceCorrection) -> Value {
+    json!({
+        "correctionId": &correction.correction_id,
+        "correctionType": &correction.correction_type,
+        "correctionReasoning": &correction.correction_reasoning,
+        "correctionApprovedAtMs": correction.correction_approved_at_ms,
+    })
+}
+
+fn texture_provenance_to_json(texture: &TextureProvenance) -> Value {
+    json!({
+        "textureSource": &texture.texture_source,
+        "loraArchetype": &texture.lora_archetype,
+        "loraWeight": texture.lora_weight,
+        "controlnetConditioningSource": &texture.controlnet_conditioning_source,
+        "textureConfidence": texture.texture_confidence,
     })
 }
 
@@ -2441,9 +3124,9 @@ mod tests {
         .expect("pipeline runs");
 
         let spec = output.merged.spec;
-        assert_eq!(spec.mass.unwrap().story_count, 2);
-        assert_eq!(spec.facades[0].material, "brick");
-        assert_eq!(spec.roof.unwrap().form, "flat");
+        assert_eq!(spec.mass.unwrap().stories, 2);
+        assert_eq!(spec.facades[0].primary_material, "brick");
+        assert_eq!(spec.roof.unwrap().roof_type, "flat");
         assert_eq!(output.asset_manifest.status, "queued");
         assert!(output
             .embedded_subgraph
@@ -2464,11 +3147,11 @@ mod tests {
 
         let direct = extract_direct(&request(), &evidence).expect("direct extraction succeeds");
 
-        assert_eq!(direct.spec.mass.unwrap().story_count, 2);
+        assert_eq!(direct.spec.mass.unwrap().stories, 2);
         assert!(direct
             .populated_fields
             .iter()
-            .any(|field| field == "mass.story_count"));
+            .any(|field| field == "mass.stories"));
     }
 
     #[test]
@@ -2495,13 +3178,13 @@ mod tests {
     fn merge_flags_low_confidence_direct_conflict() {
         let mut direct_spec = base_spec(&request(), None);
         direct_spec.mass = Some(Mass {
-            story_count: 1,
+            stories: 1,
             provenance: Some(system_provenance("manual", "Manual value", 0.4, false)),
             ..Default::default()
         });
         let mut prior_spec = direct_spec.clone();
         prior_spec.mass = Some(Mass {
-            story_count: 3,
+            stories: 3,
             provenance: Some(prior_provenance("test-model", 0.8)),
             ..Default::default()
         });
@@ -2509,7 +3192,7 @@ mod tests {
         let merged = merge_evidence_prior(
             &DirectExtraction {
                 spec: direct_spec,
-                populated_fields: vec!["mass.story_count".to_string()],
+                populated_fields: vec!["mass.stories".to_string()],
             },
             &PriorReconstructionSpec {
                 spec: prior_spec,
@@ -2520,9 +3203,9 @@ mod tests {
         )
         .expect("merge succeeds");
 
-        assert_eq!(merged.spec.mass.unwrap().story_count, 1);
+        assert_eq!(merged.spec.mass.unwrap().stories, 1);
         assert_eq!(merged.conflicts.len(), 1);
-        assert_eq!(merged.conflicts[0].field_path, "mass.story_count");
+        assert_eq!(merged.conflicts[0].field_path, "mass.stories");
     }
 
     #[test]
@@ -2548,5 +3231,95 @@ mod tests {
 
         assert_eq!(spec.assets.len(), 1);
         assert_eq!(spec.metadata["assetManifestStatus"], "queued");
+    }
+
+    #[test]
+    fn reconstruction_spec_projects_to_pascal_style_node_tree() {
+        let mut spec = base_spec(&request(), None);
+        spec.spec_id = "spec:carriage-town:worker-cottage".to_string();
+        spec.title = "Worker's Cottage".to_string();
+        spec.mass = Some(Mass {
+            stories: 1,
+            provenance: Some(system_provenance("sanborn", "Sanborn", 0.86, false)),
+            ..Default::default()
+        });
+        spec.facades.push(Facade {
+            facade_side: "primary".to_string(),
+            primary_material: "wood".to_string(),
+            provenance: Some(system_provenance("photo", "Photo", 0.72, false)),
+            opening_grids: vec![OpeningGrid {
+                bay_count: 3,
+                floor_count: 1,
+                window_pattern: "regular".to_string(),
+                provenance: Some(system_provenance("photo", "Photo", 0.61, false)),
+                ..Default::default()
+            }],
+            attributes: HashMap::from([
+                ("texture_source".to_string(), "lora_only".to_string()),
+                (
+                    "lora_archetype".to_string(),
+                    "wood_frame_house_with_porch".to_string(),
+                ),
+                ("lora_weight".to_string(), "0.85".to_string()),
+                ("texture_confidence".to_string(), "0.58".to_string()),
+            ]),
+            texture_provenance: Some(TextureProvenance {
+                texture_source: "archival_photo".to_string(),
+                lora_archetype: "brick_storefront".to_string(),
+                lora_weight: Some(0.72),
+                controlnet_conditioning_source: "photo".to_string(),
+                texture_confidence: Some(0.81),
+            }),
+            ..Default::default()
+        });
+        spec.roof = Some(Roof {
+            roof_type: "gable".to_string(),
+            provenance: Some(prior_provenance("civic-pairformer/test", 0.49)),
+            ..Default::default()
+        });
+
+        let tree = reconstruction_spec_to_node_tree(&spec);
+        let facade_id = reconstruction_node_id(&spec, "facades[0]");
+        let opening_id = reconstruction_node_id(&spec, "facades[0].openingGrids[0]");
+        let texture_id = reconstruction_node_id(&spec, "facades[0].texture");
+
+        assert_eq!(tree.root_node_ids.len(), 1);
+        assert_eq!(
+            tree.nodes[&facade_id].node_type,
+            ReconstructionNodeType::Facade
+        );
+        assert_eq!(
+            tree.nodes[&opening_id].node_type,
+            ReconstructionNodeType::OpeningGrid
+        );
+        assert_eq!(
+            tree.nodes[&facade_id].children,
+            vec![opening_id.clone(), texture_id.clone()]
+        );
+        assert_eq!(tree.nodes[&facade_id].metadata.source_ids, vec!["photo"]);
+        assert_eq!(tree.nodes[&facade_id].metadata.confidence, Some(0.72));
+        assert_eq!(
+            tree.nodes[&texture_id].data["textureProvenance"]["textureSource"],
+            "archival_photo"
+        );
+        assert_eq!(
+            tree.nodes[&texture_id].data["textureProvenance"]["loraArchetype"],
+            "brick_storefront"
+        );
+
+        let path = reconstruction_node_path(&tree, &opening_id)
+            .iter()
+            .map(|node| node.node_type.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            path,
+            vec![
+                ReconstructionNodeType::Site,
+                ReconstructionNodeType::Building,
+                ReconstructionNodeType::Level,
+                ReconstructionNodeType::Facade,
+                ReconstructionNodeType::OpeningGrid,
+            ]
+        );
     }
 }

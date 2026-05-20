@@ -35,6 +35,47 @@ export interface SpacetimeEmbeddingResponse {
   model: string;
 }
 
+/**
+ * Phase 6: batched lookup so the building head training and
+ * inference pipelines can hydrate a whole block subgraph in
+ * a single round trip instead of N. The frozen DyGFormer
+ * produces 256-d embeddings; this endpoint returns those
+ * vectors keyed by node_id.
+ */
+export interface BatchSpacetimeEmbeddingRequest {
+  tenantContext: TenantContext | undefined;
+  nodeIds: string[];
+}
+
+export interface NodeEmbedding {
+  embedding: number[];
+  /**
+   * True when the node had no embedding upstream and the server
+   * returned a zero vector. The training and inference paths use
+   * this flag to mask the slot rather than treat zeros as real.
+   */
+  missing: boolean;
+}
+
+export interface BatchSpacetimeEmbeddingResponse {
+  /**
+   * Keyed by node_id. Always present for every requested id,
+   * with `missing=true` when upstream had no embedding.
+   */
+  embeddings: { [key: string]: NodeEmbedding };
+  model: string;
+  /**
+   * Version of the upstream Theseus model used. Phase 6 training
+   * pins to a single model version per run.
+   */
+  modelVersion: string;
+}
+
+export interface BatchSpacetimeEmbeddingResponse_EmbeddingsEntry {
+  key: string;
+  value: NodeEmbedding | undefined;
+}
+
 export interface SearchObjectsRequest {
   tenantContext: TenantContext | undefined;
   query: string;
@@ -493,6 +534,391 @@ export const SpacetimeEmbeddingResponse: MessageFns<SpacetimeEmbeddingResponse> 
   },
 };
 
+function createBaseBatchSpacetimeEmbeddingRequest(): BatchSpacetimeEmbeddingRequest {
+  return { tenantContext: undefined, nodeIds: [] };
+}
+
+export const BatchSpacetimeEmbeddingRequest: MessageFns<BatchSpacetimeEmbeddingRequest> = {
+  encode(message: BatchSpacetimeEmbeddingRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.tenantContext !== undefined) {
+      TenantContext.encode(message.tenantContext, writer.uint32(10).fork()).join();
+    }
+    for (const v of message.nodeIds) {
+      writer.uint32(18).string(v!);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): BatchSpacetimeEmbeddingRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseBatchSpacetimeEmbeddingRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.tenantContext = TenantContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.nodeIds.push(reader.string());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): BatchSpacetimeEmbeddingRequest {
+    return {
+      tenantContext: isSet(object.tenantContext)
+        ? TenantContext.fromJSON(object.tenantContext)
+        : isSet(object.tenant_context)
+        ? TenantContext.fromJSON(object.tenant_context)
+        : undefined,
+      nodeIds: globalThis.Array.isArray(object?.nodeIds)
+        ? object.nodeIds.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.node_ids)
+        ? object.node_ids.map((e: any) => globalThis.String(e))
+        : [],
+    };
+  },
+
+  toJSON(message: BatchSpacetimeEmbeddingRequest): unknown {
+    const obj: any = {};
+    if (message.tenantContext !== undefined) {
+      obj.tenantContext = TenantContext.toJSON(message.tenantContext);
+    }
+    if (message.nodeIds?.length) {
+      obj.nodeIds = message.nodeIds;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<BatchSpacetimeEmbeddingRequest>): BatchSpacetimeEmbeddingRequest {
+    return BatchSpacetimeEmbeddingRequest.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<BatchSpacetimeEmbeddingRequest>): BatchSpacetimeEmbeddingRequest {
+    const message = createBaseBatchSpacetimeEmbeddingRequest();
+    message.tenantContext = (object.tenantContext !== undefined && object.tenantContext !== null)
+      ? TenantContext.fromPartial(object.tenantContext)
+      : undefined;
+    message.nodeIds = object.nodeIds?.map((e) => e) || [];
+    return message;
+  },
+};
+
+function createBaseNodeEmbedding(): NodeEmbedding {
+  return { embedding: [], missing: false };
+}
+
+export const NodeEmbedding: MessageFns<NodeEmbedding> = {
+  encode(message: NodeEmbedding, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    writer.uint32(10).fork();
+    for (const v of message.embedding) {
+      writer.float(v);
+    }
+    writer.join();
+    if (message.missing !== false) {
+      writer.uint32(16).bool(message.missing);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): NodeEmbedding {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseNodeEmbedding();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag === 13) {
+            message.embedding.push(reader.float());
+
+            continue;
+          }
+
+          if (tag === 10) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.embedding.push(reader.float());
+            }
+
+            continue;
+          }
+
+          break;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.missing = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): NodeEmbedding {
+    return {
+      embedding: globalThis.Array.isArray(object?.embedding)
+        ? object.embedding.map((e: any) => globalThis.Number(e))
+        : [],
+      missing: isSet(object.missing) ? globalThis.Boolean(object.missing) : false,
+    };
+  },
+
+  toJSON(message: NodeEmbedding): unknown {
+    const obj: any = {};
+    if (message.embedding?.length) {
+      obj.embedding = message.embedding;
+    }
+    if (message.missing !== false) {
+      obj.missing = message.missing;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<NodeEmbedding>): NodeEmbedding {
+    return NodeEmbedding.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<NodeEmbedding>): NodeEmbedding {
+    const message = createBaseNodeEmbedding();
+    message.embedding = object.embedding?.map((e) => e) || [];
+    message.missing = object.missing ?? false;
+    return message;
+  },
+};
+
+function createBaseBatchSpacetimeEmbeddingResponse(): BatchSpacetimeEmbeddingResponse {
+  return { embeddings: {}, model: "", modelVersion: "" };
+}
+
+export const BatchSpacetimeEmbeddingResponse: MessageFns<BatchSpacetimeEmbeddingResponse> = {
+  encode(message: BatchSpacetimeEmbeddingResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    globalThis.Object.entries(message.embeddings).forEach(([key, value]: [string, NodeEmbedding]) => {
+      BatchSpacetimeEmbeddingResponse_EmbeddingsEntry.encode({ key: key as any, value }, writer.uint32(10).fork())
+        .join();
+    });
+    if (message.model !== "") {
+      writer.uint32(18).string(message.model);
+    }
+    if (message.modelVersion !== "") {
+      writer.uint32(26).string(message.modelVersion);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): BatchSpacetimeEmbeddingResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseBatchSpacetimeEmbeddingResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          const entry1 = BatchSpacetimeEmbeddingResponse_EmbeddingsEntry.decode(reader, reader.uint32());
+          if (entry1.value !== undefined) {
+            message.embeddings[entry1.key] = entry1.value;
+          }
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.model = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.modelVersion = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): BatchSpacetimeEmbeddingResponse {
+    return {
+      embeddings: isObject(object.embeddings)
+        ? (globalThis.Object.entries(object.embeddings) as [string, any][]).reduce(
+          (acc: { [key: string]: NodeEmbedding }, [key, value]: [string, any]) => {
+            acc[key] = NodeEmbedding.fromJSON(value);
+            return acc;
+          },
+          {},
+        )
+        : {},
+      model: isSet(object.model) ? globalThis.String(object.model) : "",
+      modelVersion: isSet(object.modelVersion)
+        ? globalThis.String(object.modelVersion)
+        : isSet(object.model_version)
+        ? globalThis.String(object.model_version)
+        : "",
+    };
+  },
+
+  toJSON(message: BatchSpacetimeEmbeddingResponse): unknown {
+    const obj: any = {};
+    if (message.embeddings) {
+      const entries = globalThis.Object.entries(message.embeddings) as [string, NodeEmbedding][];
+      if (entries.length > 0) {
+        obj.embeddings = {};
+        entries.forEach(([k, v]) => {
+          obj.embeddings[k] = NodeEmbedding.toJSON(v);
+        });
+      }
+    }
+    if (message.model !== "") {
+      obj.model = message.model;
+    }
+    if (message.modelVersion !== "") {
+      obj.modelVersion = message.modelVersion;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<BatchSpacetimeEmbeddingResponse>): BatchSpacetimeEmbeddingResponse {
+    return BatchSpacetimeEmbeddingResponse.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<BatchSpacetimeEmbeddingResponse>): BatchSpacetimeEmbeddingResponse {
+    const message = createBaseBatchSpacetimeEmbeddingResponse();
+    message.embeddings = (globalThis.Object.entries(object.embeddings ?? {}) as [string, NodeEmbedding][]).reduce(
+      (acc: { [key: string]: NodeEmbedding }, [key, value]: [string, NodeEmbedding]) => {
+        if (value !== undefined) {
+          acc[key] = NodeEmbedding.fromPartial(value);
+        }
+        return acc;
+      },
+      {},
+    );
+    message.model = object.model ?? "";
+    message.modelVersion = object.modelVersion ?? "";
+    return message;
+  },
+};
+
+function createBaseBatchSpacetimeEmbeddingResponse_EmbeddingsEntry(): BatchSpacetimeEmbeddingResponse_EmbeddingsEntry {
+  return { key: "", value: undefined };
+}
+
+export const BatchSpacetimeEmbeddingResponse_EmbeddingsEntry: MessageFns<
+  BatchSpacetimeEmbeddingResponse_EmbeddingsEntry
+> = {
+  encode(
+    message: BatchSpacetimeEmbeddingResponse_EmbeddingsEntry,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
+    if (message.key !== "") {
+      writer.uint32(10).string(message.key);
+    }
+    if (message.value !== undefined) {
+      NodeEmbedding.encode(message.value, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): BatchSpacetimeEmbeddingResponse_EmbeddingsEntry {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseBatchSpacetimeEmbeddingResponse_EmbeddingsEntry();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.key = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.value = NodeEmbedding.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): BatchSpacetimeEmbeddingResponse_EmbeddingsEntry {
+    return {
+      key: isSet(object.key) ? globalThis.String(object.key) : "",
+      value: isSet(object.value) ? NodeEmbedding.fromJSON(object.value) : undefined,
+    };
+  },
+
+  toJSON(message: BatchSpacetimeEmbeddingResponse_EmbeddingsEntry): unknown {
+    const obj: any = {};
+    if (message.key !== "") {
+      obj.key = message.key;
+    }
+    if (message.value !== undefined) {
+      obj.value = NodeEmbedding.toJSON(message.value);
+    }
+    return obj;
+  },
+
+  create(
+    base?: DeepPartial<BatchSpacetimeEmbeddingResponse_EmbeddingsEntry>,
+  ): BatchSpacetimeEmbeddingResponse_EmbeddingsEntry {
+    return BatchSpacetimeEmbeddingResponse_EmbeddingsEntry.fromPartial(base ?? {});
+  },
+  fromPartial(
+    object: DeepPartial<BatchSpacetimeEmbeddingResponse_EmbeddingsEntry>,
+  ): BatchSpacetimeEmbeddingResponse_EmbeddingsEntry {
+    const message = createBaseBatchSpacetimeEmbeddingResponse_EmbeddingsEntry();
+    message.key = object.key ?? "";
+    message.value = (object.value !== undefined && object.value !== null)
+      ? NodeEmbedding.fromPartial(object.value)
+      : undefined;
+    return message;
+  },
+};
+
 function createBaseSearchObjectsRequest(): SearchObjectsRequest {
   return { tenantContext: undefined, query: "", limit: 0 };
 }
@@ -878,6 +1304,19 @@ export const TheseusBridgeDefinition = {
       responseStream: false,
       options: {},
     },
+    /**
+     * Phase 6: batched version of GetSpacetimeEmbedding. Required
+     * by building_head_train and building_head_infer so a block
+     * subgraph of N nodes resolves in one call instead of N.
+     */
+    getBatchSpacetimeEmbeddings: {
+      name: "GetBatchSpacetimeEmbeddings",
+      requestType: BatchSpacetimeEmbeddingRequest as typeof BatchSpacetimeEmbeddingRequest,
+      requestStream: false,
+      responseType: BatchSpacetimeEmbeddingResponse as typeof BatchSpacetimeEmbeddingResponse,
+      responseStream: false,
+      options: {},
+    },
     searchObjects: {
       name: "SearchObjects",
       requestType: SearchObjectsRequest as typeof SearchObjectsRequest,
@@ -904,6 +1343,10 @@ export type DeepPartial<T> = T extends Builtin ? T
   : T extends ReadonlyArray<infer U> ? ReadonlyArray<DeepPartial<U>>
   : T extends {} ? { [K in keyof T]?: DeepPartial<T[K]> }
   : Partial<T>;
+
+function isObject(value: any): boolean {
+  return typeof value === "object" && value !== null;
+}
 
 function isSet(value: any): boolean {
   return value !== null && value !== undefined;

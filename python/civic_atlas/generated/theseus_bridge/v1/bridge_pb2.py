@@ -25,13 +25,15 @@ _sym_db = _symbol_database.Default()
 from civic_atlas.v1 import civic_atlas_pb2 as civic__atlas_dot_v1_dot_civic__atlas__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1etheseus_bridge/v1/bridge.proto\x12\x11theseus_bridge.v1\x1a civic_atlas/v1/civic_atlas.proto\"l\n\x15SpacetimeTopicRequest\x12\x35\n\x0etenant_context\x18\x01 \x01(\x0b\x32\x1d.civic_atlas.v1.TenantContext\x12\r\n\x05topic\x18\x02 \x01(\t\x12\r\n\x05limit\x18\x03 \x01(\r\"h\n\x13SpacetimeTopicChunk\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\r\n\x05title\x18\x02 \x01(\t\x12\x0f\n\x07summary\x18\x03 \x01(\t\x12\r\n\x05score\x18\x04 \x01(\x01\x12\x11\n\tembedding\x18\x05 \x03(\x02\"c\n\x19SpacetimeEmbeddingRequest\x12\x35\n\x0etenant_context\x18\x01 \x01(\x0b\x32\x1d.civic_atlas.v1.TenantContext\x12\x0f\n\x07node_id\x18\x02 \x01(\t\"O\n\x1aSpacetimeEmbeddingResponse\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x11\n\tembedding\x18\x02 \x03(\x02\x12\r\n\x05model\x18\x03 \x01(\t\"k\n\x14SearchObjectsRequest\x12\x35\n\x0etenant_context\x18\x01 \x01(\x0b\x32\x1d.civic_atlas.v1.TenantContext\x12\r\n\x05query\x18\x02 \x01(\t\x12\r\n\x05limit\x18\x03 \x01(\r\"E\n\x15SearchObjectsResponse\x12,\n\x07objects\x18\x01 \x03(\x0b\x32\x1b.civic_atlas.v1.CivicObject\"\x8d\x01\n\x15IngestArtifactRequest\x12\x35\n\x0etenant_context\x18\x01 \x01(\x0b\x32\x1d.civic_atlas.v1.TenantContext\x12\x13\n\x0b\x61rtifact_id\x18\x02 \x01(\t\x12\x12\n\nsource_uri\x18\x03 \x01(\t\x12\x14\n\x0cpayload_json\x18\x04 \x01(\t\"=\n\x16IngestArtifactResponse\x12\x13\n\x0b\x61rtifact_id\x18\x01 \x01(\t\x12\x0e\n\x06status\x18\x02 \x01(\t2\xbd\x03\n\rTheseusBridge\x12k\n\x15ResolveSpacetimeTopic\x12(.theseus_bridge.v1.SpacetimeTopicRequest\x1a&.theseus_bridge.v1.SpacetimeTopicChunk0\x01\x12t\n\x15GetSpacetimeEmbedding\x12,.theseus_bridge.v1.SpacetimeEmbeddingRequest\x1a-.theseus_bridge.v1.SpacetimeEmbeddingResponse\x12\x62\n\rSearchObjects\x12\'.theseus_bridge.v1.SearchObjectsRequest\x1a(.theseus_bridge.v1.SearchObjectsResponse\x12\x65\n\x0eIngestArtifact\x12(.theseus_bridge.v1.IngestArtifactRequest\x1a).theseus_bridge.v1.IngestArtifactResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1etheseus_bridge/v1/bridge.proto\x12\x11theseus_bridge.v1\x1a civic_atlas/v1/civic_atlas.proto\"l\n\x15SpacetimeTopicRequest\x12\x35\n\x0etenant_context\x18\x01 \x01(\x0b\x32\x1d.civic_atlas.v1.TenantContext\x12\r\n\x05topic\x18\x02 \x01(\t\x12\r\n\x05limit\x18\x03 \x01(\r\"h\n\x13SpacetimeTopicChunk\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\r\n\x05title\x18\x02 \x01(\t\x12\x0f\n\x07summary\x18\x03 \x01(\t\x12\r\n\x05score\x18\x04 \x01(\x01\x12\x11\n\tembedding\x18\x05 \x03(\x02\"c\n\x19SpacetimeEmbeddingRequest\x12\x35\n\x0etenant_context\x18\x01 \x01(\x0b\x32\x1d.civic_atlas.v1.TenantContext\x12\x0f\n\x07node_id\x18\x02 \x01(\t\"O\n\x1aSpacetimeEmbeddingResponse\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x11\n\tembedding\x18\x02 \x03(\x02\x12\r\n\x05model\x18\x03 \x01(\t\"i\n\x1e\x42\x61tchSpacetimeEmbeddingRequest\x12\x35\n\x0etenant_context\x18\x01 \x01(\x0b\x32\x1d.civic_atlas.v1.TenantContext\x12\x10\n\x08node_ids\x18\x02 \x03(\t\"3\n\rNodeEmbedding\x12\x11\n\tembedding\x18\x01 \x03(\x02\x12\x0f\n\x07missing\x18\x02 \x01(\x08\"\xf4\x01\n\x1f\x42\x61tchSpacetimeEmbeddingResponse\x12V\n\nembeddings\x18\x01 \x03(\x0b\x32\x42.theseus_bridge.v1.BatchSpacetimeEmbeddingResponse.EmbeddingsEntry\x12\r\n\x05model\x18\x02 \x01(\t\x12\x15\n\rmodel_version\x18\x03 \x01(\t\x1aS\n\x0f\x45mbeddingsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12/\n\x05value\x18\x02 \x01(\x0b\x32 .theseus_bridge.v1.NodeEmbedding:\x02\x38\x01\"k\n\x14SearchObjectsRequest\x12\x35\n\x0etenant_context\x18\x01 \x01(\x0b\x32\x1d.civic_atlas.v1.TenantContext\x12\r\n\x05query\x18\x02 \x01(\t\x12\r\n\x05limit\x18\x03 \x01(\r\"E\n\x15SearchObjectsResponse\x12,\n\x07objects\x18\x01 \x03(\x0b\x32\x1b.civic_atlas.v1.CivicObject\"\x8d\x01\n\x15IngestArtifactRequest\x12\x35\n\x0etenant_context\x18\x01 \x01(\x0b\x32\x1d.civic_atlas.v1.TenantContext\x12\x13\n\x0b\x61rtifact_id\x18\x02 \x01(\t\x12\x12\n\nsource_uri\x18\x03 \x01(\t\x12\x14\n\x0cpayload_json\x18\x04 \x01(\t\"=\n\x16IngestArtifactResponse\x12\x13\n\x0b\x61rtifact_id\x18\x01 \x01(\t\x12\x0e\n\x06status\x18\x02 \x01(\t2\xc4\x04\n\rTheseusBridge\x12k\n\x15ResolveSpacetimeTopic\x12(.theseus_bridge.v1.SpacetimeTopicRequest\x1a&.theseus_bridge.v1.SpacetimeTopicChunk0\x01\x12t\n\x15GetSpacetimeEmbedding\x12,.theseus_bridge.v1.SpacetimeEmbeddingRequest\x1a-.theseus_bridge.v1.SpacetimeEmbeddingResponse\x12\x84\x01\n\x1bGetBatchSpacetimeEmbeddings\x12\x31.theseus_bridge.v1.BatchSpacetimeEmbeddingRequest\x1a\x32.theseus_bridge.v1.BatchSpacetimeEmbeddingResponse\x12\x62\n\rSearchObjects\x12\'.theseus_bridge.v1.SearchObjectsRequest\x1a(.theseus_bridge.v1.SearchObjectsResponse\x12\x65\n\x0eIngestArtifact\x12(.theseus_bridge.v1.IngestArtifactRequest\x1a).theseus_bridge.v1.IngestArtifactResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'theseus_bridge.v1.bridge_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
+  _globals['_BATCHSPACETIMEEMBEDDINGRESPONSE_EMBEDDINGSENTRY']._loaded_options = None
+  _globals['_BATCHSPACETIMEEMBEDDINGRESPONSE_EMBEDDINGSENTRY']._serialized_options = b'8\001'
   _globals['_SPACETIMETOPICREQUEST']._serialized_start=87
   _globals['_SPACETIMETOPICREQUEST']._serialized_end=195
   _globals['_SPACETIMETOPICCHUNK']._serialized_start=197
@@ -40,14 +42,22 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_SPACETIMEEMBEDDINGREQUEST']._serialized_end=402
   _globals['_SPACETIMEEMBEDDINGRESPONSE']._serialized_start=404
   _globals['_SPACETIMEEMBEDDINGRESPONSE']._serialized_end=483
-  _globals['_SEARCHOBJECTSREQUEST']._serialized_start=485
-  _globals['_SEARCHOBJECTSREQUEST']._serialized_end=592
-  _globals['_SEARCHOBJECTSRESPONSE']._serialized_start=594
-  _globals['_SEARCHOBJECTSRESPONSE']._serialized_end=663
-  _globals['_INGESTARTIFACTREQUEST']._serialized_start=666
-  _globals['_INGESTARTIFACTREQUEST']._serialized_end=807
-  _globals['_INGESTARTIFACTRESPONSE']._serialized_start=809
-  _globals['_INGESTARTIFACTRESPONSE']._serialized_end=870
-  _globals['_THESEUSBRIDGE']._serialized_start=873
-  _globals['_THESEUSBRIDGE']._serialized_end=1318
+  _globals['_BATCHSPACETIMEEMBEDDINGREQUEST']._serialized_start=485
+  _globals['_BATCHSPACETIMEEMBEDDINGREQUEST']._serialized_end=590
+  _globals['_NODEEMBEDDING']._serialized_start=592
+  _globals['_NODEEMBEDDING']._serialized_end=643
+  _globals['_BATCHSPACETIMEEMBEDDINGRESPONSE']._serialized_start=646
+  _globals['_BATCHSPACETIMEEMBEDDINGRESPONSE']._serialized_end=890
+  _globals['_BATCHSPACETIMEEMBEDDINGRESPONSE_EMBEDDINGSENTRY']._serialized_start=807
+  _globals['_BATCHSPACETIMEEMBEDDINGRESPONSE_EMBEDDINGSENTRY']._serialized_end=890
+  _globals['_SEARCHOBJECTSREQUEST']._serialized_start=892
+  _globals['_SEARCHOBJECTSREQUEST']._serialized_end=999
+  _globals['_SEARCHOBJECTSRESPONSE']._serialized_start=1001
+  _globals['_SEARCHOBJECTSRESPONSE']._serialized_end=1070
+  _globals['_INGESTARTIFACTREQUEST']._serialized_start=1073
+  _globals['_INGESTARTIFACTREQUEST']._serialized_end=1214
+  _globals['_INGESTARTIFACTRESPONSE']._serialized_start=1216
+  _globals['_INGESTARTIFACTRESPONSE']._serialized_end=1277
+  _globals['_THESEUSBRIDGE']._serialized_start=1280
+  _globals['_THESEUSBRIDGE']._serialized_end=1860
 # @@protoc_insertion_point(module_scope)

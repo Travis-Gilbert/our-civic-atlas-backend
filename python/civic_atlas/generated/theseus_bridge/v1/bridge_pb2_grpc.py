@@ -44,6 +44,11 @@ class TheseusBridgeStub(object):
                 request_serializer=theseus__bridge_dot_v1_dot_bridge__pb2.SpacetimeEmbeddingRequest.SerializeToString,
                 response_deserializer=theseus__bridge_dot_v1_dot_bridge__pb2.SpacetimeEmbeddingResponse.FromString,
                 _registered_method=True)
+        self.GetBatchSpacetimeEmbeddings = channel.unary_unary(
+                '/theseus_bridge.v1.TheseusBridge/GetBatchSpacetimeEmbeddings',
+                request_serializer=theseus__bridge_dot_v1_dot_bridge__pb2.BatchSpacetimeEmbeddingRequest.SerializeToString,
+                response_deserializer=theseus__bridge_dot_v1_dot_bridge__pb2.BatchSpacetimeEmbeddingResponse.FromString,
+                _registered_method=True)
         self.SearchObjects = channel.unary_unary(
                 '/theseus_bridge.v1.TheseusBridge/SearchObjects',
                 request_serializer=theseus__bridge_dot_v1_dot_bridge__pb2.SearchObjectsRequest.SerializeToString,
@@ -67,6 +72,15 @@ class TheseusBridgeServicer(object):
 
     def GetSpacetimeEmbedding(self, request, context):
         """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetBatchSpacetimeEmbeddings(self, request, context):
+        """Phase 6: batched version of GetSpacetimeEmbedding. Required
+        by building_head_train and building_head_infer so a block
+        subgraph of N nodes resolves in one call instead of N.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -95,6 +109,11 @@ def add_TheseusBridgeServicer_to_server(servicer, server):
                     servicer.GetSpacetimeEmbedding,
                     request_deserializer=theseus__bridge_dot_v1_dot_bridge__pb2.SpacetimeEmbeddingRequest.FromString,
                     response_serializer=theseus__bridge_dot_v1_dot_bridge__pb2.SpacetimeEmbeddingResponse.SerializeToString,
+            ),
+            'GetBatchSpacetimeEmbeddings': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetBatchSpacetimeEmbeddings,
+                    request_deserializer=theseus__bridge_dot_v1_dot_bridge__pb2.BatchSpacetimeEmbeddingRequest.FromString,
+                    response_serializer=theseus__bridge_dot_v1_dot_bridge__pb2.BatchSpacetimeEmbeddingResponse.SerializeToString,
             ),
             'SearchObjects': grpc.unary_unary_rpc_method_handler(
                     servicer.SearchObjects,
@@ -161,6 +180,33 @@ class TheseusBridge(object):
             '/theseus_bridge.v1.TheseusBridge/GetSpacetimeEmbedding',
             theseus__bridge_dot_v1_dot_bridge__pb2.SpacetimeEmbeddingRequest.SerializeToString,
             theseus__bridge_dot_v1_dot_bridge__pb2.SpacetimeEmbeddingResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetBatchSpacetimeEmbeddings(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/theseus_bridge.v1.TheseusBridge/GetBatchSpacetimeEmbeddings',
+            theseus__bridge_dot_v1_dot_bridge__pb2.BatchSpacetimeEmbeddingRequest.SerializeToString,
+            theseus__bridge_dot_v1_dot_bridge__pb2.BatchSpacetimeEmbeddingResponse.FromString,
             options,
             channel_credentials,
             insecure,

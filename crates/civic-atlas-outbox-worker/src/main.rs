@@ -87,7 +87,7 @@ struct Args {
 struct BuildingPresencePayload {
     #[serde(rename = "specId")]
     spec_id: String,
-    #[serde(rename = "version")]
+    #[serde(rename = "specVersion", alias = "version", alias = "spec_version")]
     spec_version: i32,
     #[serde(rename = "buildingId")]
     building_id: String,
@@ -377,7 +377,7 @@ async fn persist_reconstruction_output(
     )
     .bind(job.tenant_id)
     .bind(&spec.spec_id)
-    .bind(spec.version as i32)
+    .bind(spec.spec_version as i32)
     .bind(spec_status_sql(spec.status))
     .bind(building_id)
     .bind(parcel_id)
@@ -487,7 +487,7 @@ async fn persist_reconstruction_output(
 
     Ok(ProcessedReconstruction {
         spec_id: spec.spec_id,
-        spec_version: spec.version,
+        spec_version: spec.spec_version,
         stage_report,
     })
 }
@@ -499,12 +499,12 @@ async fn enqueue_building_presence_projection(
 ) -> Result<()> {
     let idempotency_key = format!(
         "procedural-reconstruction:building-presence:{tenant_id}:{}:{}",
-        spec.spec_id, spec.version
+        spec.spec_id, spec.spec_version
     );
     let payload = json!({
         "projectionKind": "BuildingPresence",
         "specId": spec.spec_id,
-        "version": spec.version,
+        "specVersion": spec.spec_version,
         "buildingId": spec.building_id,
         "civicObjectId": spec.civic_object_id,
     });
@@ -520,7 +520,7 @@ async fn enqueue_building_presence_projection(
     )
     .bind(tenant_id)
     .bind(&spec.spec_id)
-    .bind(spec.version as i32)
+    .bind(spec.spec_version as i32)
     .bind(idempotency_key)
     .bind(Json(payload))
     .execute(&mut **tx)
@@ -931,6 +931,7 @@ fn backoff_for_attempt(base_secs: i64, attempt: i32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn backoff_grows_then_caps() {
@@ -945,6 +946,32 @@ mod tests {
     #[test]
     fn backoff_handles_attempt_zero() {
         assert_eq!(backoff_for_attempt(15, 0), 15);
+    }
+
+    #[test]
+    fn building_presence_payload_accepts_usd_spec_version_alias() {
+        let payload: BuildingPresencePayload = serde_json::from_value(json!({
+            "specId": "spec:ct-001",
+            "specVersion": 7,
+            "buildingId": "building-001",
+            "civicObjectId": "building:ct-001"
+        }))
+        .expect("specVersion payload decodes");
+
+        assert_eq!(payload.spec_version, 7);
+    }
+
+    #[test]
+    fn building_presence_payload_still_accepts_legacy_version() {
+        let payload: BuildingPresencePayload = serde_json::from_value(json!({
+            "specId": "spec:ct-001",
+            "version": 3,
+            "buildingId": "building-001",
+            "civicObjectId": "building:ct-001"
+        }))
+        .expect("legacy version payload decodes");
+
+        assert_eq!(payload.spec_version, 3);
     }
 }
 

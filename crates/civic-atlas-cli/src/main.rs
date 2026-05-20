@@ -232,13 +232,21 @@ fn validate_spec(spec: &Value) -> anyhow::Result<SpecSummary> {
     let spec_id = required_string_field(spec, &["specId", "spec_id"])?;
     let civic_object_id = required_string_field(spec, &["civicObjectId", "civic_object_id"])?;
     let title = required_string_field(spec, &["title"])?;
-    let version = integer_field(spec, &["version"])?.unwrap_or(1);
+    let version = integer_field(spec, &["specVersion", "spec_version", "version"])?.unwrap_or(1);
     anyhow::ensure!(version > 0, "version must be greater than zero");
 
-    validate_optional_confidence(spec, &["mass", "provenance", "confidence"])?;
-    validate_optional_confidence(spec, &["roof", "provenance", "confidence"])?;
-    validate_optional_confidence(spec, &["groundFloor", "provenance", "confidence"])?;
-    validate_optional_confidence(spec, &["ground_floor", "provenance", "confidence"])?;
+    validate_optional_provenance_confidence(spec, &["mass", "provenance"], "mass.provenance")?;
+    validate_optional_provenance_confidence(spec, &["roof", "provenance"], "roof.provenance")?;
+    validate_optional_provenance_confidence(
+        spec,
+        &["groundFloor", "provenance"],
+        "groundFloor.provenance",
+    )?;
+    validate_optional_provenance_confidence(
+        spec,
+        &["ground_floor", "provenance"],
+        "ground_floor.provenance",
+    )?;
     validate_part_array_confidence(spec, &["facades"])?;
     validate_part_array_confidence(spec, &["ornaments"])?;
     validate_opening_grid_confidence(spec)?;
@@ -295,17 +303,32 @@ fn optional_uuid_field(value: &Value, names: &[&str]) -> anyhow::Result<Option<U
     Ok(Some(raw.parse()?))
 }
 
-fn validate_optional_confidence(spec: &Value, path: &[&str]) -> anyhow::Result<()> {
-    let Some(value) = path.iter().try_fold(spec, |current, key| current.get(*key)) else {
+fn validate_optional_provenance_confidence(
+    spec: &Value,
+    path: &[&str],
+    label: &str,
+) -> anyhow::Result<()> {
+    let Some(provenance) = path.iter().try_fold(spec, |current, key| current.get(*key)) else {
+        return Ok(());
+    };
+    validate_optional_confidence_field(provenance, label)
+}
+
+fn validate_optional_confidence_field(provenance: &Value, label: &str) -> anyhow::Result<()> {
+    let Some(value) = ["partConfidence", "part_confidence", "confidence"]
+        .iter()
+        .find_map(|name| provenance.get(*name).map(|value| (*name, value)))
+    else {
         return Ok(());
     };
     let confidence = value
+        .1
         .as_f64()
-        .ok_or_else(|| anyhow::anyhow!("{} must be a number", path.join(".")))?;
+        .ok_or_else(|| anyhow::anyhow!("{}.{} must be a number", label, value.0))?;
     anyhow::ensure!(
         (0.0..=1.0).contains(&confidence),
         "{} must be between 0 and 1",
-        path.join(".")
+        format!("{}.{}", label, value.0)
     );
     Ok(())
 }
@@ -318,8 +341,11 @@ fn validate_part_array_confidence(spec: &Value, names: &[&str]) -> anyhow::Resul
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("{} must be an array", names[0]))?;
     for (index, part) in parts.iter().enumerate() {
-        validate_optional_confidence(part, &["provenance", "confidence"])
-            .map_err(|err| anyhow::anyhow!("{}[{index}]: {err}", names[0]))?;
+        validate_optional_provenance_confidence(
+            part,
+            &["provenance"],
+            &format!("{}[{index}].provenance", names[0]),
+        )?;
     }
     Ok(())
 }
@@ -337,9 +363,11 @@ fn validate_opening_grid_confidence(spec: &Value) -> anyhow::Result<()> {
             continue;
         };
         for (grid_index, grid) in grids.iter().enumerate() {
-            validate_optional_confidence(grid, &["provenance", "confidence"]).map_err(|err| {
-                anyhow::anyhow!("facades[{facade_index}].openingGrids[{grid_index}]: {err}")
-            })?;
+            validate_optional_provenance_confidence(
+                grid,
+                &["provenance"],
+                &format!("facades[{facade_index}].openingGrids[{grid_index}].provenance"),
+            )?;
         }
     }
     Ok(())
@@ -381,14 +409,14 @@ mod tests {
             "specId": "carriage-town-001",
             "civicObjectId": "building:001",
             "title": "Carriage Town storefront",
-            "version": 2,
+            "specVersion": 2,
             "mass": {
-                "provenance": {"confidence": 0.82}
+                "provenance": {"partConfidence": 0.82}
             },
             "facades": [{
-                "provenance": {"confidence": 0.7},
+                "provenance": {"part_confidence": 0.7},
                 "openingGrids": [{
-                    "provenance": {"confidence": 0.6}
+                    "provenance": {"partConfidence": 0.6}
                 }]
             }],
             "roof": {
@@ -419,7 +447,7 @@ mod tests {
             "title": "Carriage Town storefront",
             "version": 1,
             "ground_floor": {
-                "provenance": {"confidence": 1.2}
+                "provenance": {"partConfidence": 1.2}
             }
         });
 
@@ -427,6 +455,6 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("ground_floor.provenance.confidence must be between 0 and 1"));
+            .contains("ground_floor.provenance.partConfidence must be between 0 and 1"));
     }
 }
