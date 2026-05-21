@@ -25,7 +25,10 @@ Theseus bridge clients.
   procedural reconstruction algorithm as typed, independently testable stages:
   evidence assembly, direct extraction, block subgraph construction, spacetime
   embedding hydration, Pairformer-ready prior inference, merge, asset manifest
-  generation, and persistence handoff.
+  generation, and persistence handoff. It also projects each
+  `ReconstructionSpec` into a Pascal-style flat node tree for editor,
+  correction, texture-provenance, and per-part dossier targeting while keeping
+  PostGIS specs as truth.
 - `crates/civic-atlas-outbox-worker` drains both reconstruction projection
   intents and `reconstruction_jobs` pipeline requests. Pipeline jobs write
   generated ReconstructionSpecs back to PostGIS and can auto-approve into
@@ -80,5 +83,17 @@ cargo run -p civic-atlas-cli -- spec submit path/to/spec.json
 - `THESEUS_BRIDGE_URL`: gRPC URL for the Theseus bridge process.
 - `RECONSTRUCTION_JOB_BATCH_SIZE`: worker batch size for procedural
   reconstruction jobs, default `4`.
-- `SCENE_FOUNDRY_URI_PREFIX`: asset manifest URI prefix while the Blender/Modal
+- `SCENE_FOUNDRY_URI_PREFIX`: asset manifest URI prefix while the Blender/Ray
   renderer is queued or stubbed, default `scene-foundry://queued`.
+
+## Related Repos
+
+- `Open-Flint-Atlas-main-release`: public web app and resident-facing read
+  surface. It consumes projected atlas/read-model data and should not own
+  canonical reconstruction writes.
+- `civic-atlas-ingest`: bursty Python/Ray-on-RunPod lane for corpus ingestion,
+  building-head training/inference, and Blender Scene Foundry rendering. It is
+  intentionally separate from this long-running Rust/PostGIS service boundary
+  because GPU, data-ingest, and Blender toolchains co-evolve there.
+- `Index-API`: Theseus upstream for spacetime embeddings, Pairformer/GNN
+  architecture source material, and graph-native reasoning services.

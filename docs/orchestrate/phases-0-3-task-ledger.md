@@ -52,7 +52,7 @@ lower-level composition of H3 space and node time intervals.
 | OCA-BE-P2-004 | Implement procedural reconstruction engine. | algorithm spec + backend crate | execute | Eight stages are represented as typed contracts: evidence bundle, direct extraction, block subgraph, spacetime embeddings, Pairformer-ready prior inference, direct-wins merge, Scene Foundry manifest, and PostGIS persistence handoff. | `cargo test -p civic-atlas-reconstruction-engine` | Algorithm remains a handwritten seed path only. | partial |
 | OCA-BE-P2-005 | Add tenant-scoped reconstruction job queue. | worker + migration | execute | `reconstruction_jobs` can run the full engine from parcel/time slice, write an in-review spec, and optionally auto-approve into parts plus projection outbox. | worker compile, migration test | Pipeline cannot run outside a human curator call. | partial |
 | OCA-BE-P3-001 | Create Blender primitive library repo. | new repo | execute | Eight parameterized archetypes exist and are addressed by spec fields. | asset metadata validation | Assets become hand-authored one-offs. | planned |
-| OCA-BE-P3-002 | Add Modal Scene Foundry renderer. | Modal app | execute | `render_spec_to_glb` uploads deterministic GLB asset path by tenant/spec/version/hash. | Modal smoke | Asset generation lacks replayability. | planned |
+| OCA-BE-P3-002 | Add Ray Scene Foundry renderer. | Ray task | execute | `render_spec_to_glb` uploads deterministic GLB asset path by tenant/spec/version/hash. | Ray task smoke | Asset generation lacks replayability. | planned |
 | OCA-BE-P3-003 | Add Carriage Town frontend route. | public atlas route | execute | Route fetches 20 specs through GraphQL and renders GLBs over MapLibre/deck.gl with per-part confidence. | browser screenshots | R3F replaces the map base. | planned |
 
 ## Phase Report Requirements
@@ -103,8 +103,22 @@ the existing unused `SimpleMeshLayer` warning in `AtlasMap.tsx`.
 | 4. Spacetime Embedding Hydration | `hydrate_embeddings` | Calls `GetBatchSpacetimeEmbeddings` when `THESEUS_BRIDGE_URL` is set; otherwise uses explicit zero embeddings with `missing_embedding=true`. |
 | 5. Block-Coherent Prior Inference | `PairformerCivicPriorModel` | Stage contract is Pairformer-ready: node features combine spacetime embeddings and direct-field counts; edge features preserve relation, distance, time distance, shared-wall/setback slots; publishable edge confidence records are emitted. The current model is a deterministic fallback until the civic Pairformer weights ship. |
 | 6. Evidence-Prior Merge | `merge_evidence_prior` | Direct extraction wins; low-confidence direct values that disagree with priors become explicit merge conflicts. |
-| 7. Geometry + Asset Generation | `SceneFoundryManifestGenerator` | Emits a queued Scene Foundry manifest and asset slot. Blender/Modal execution remains a downstream renderer integration. |
+| 7. Geometry + Asset Generation | `SceneFoundryManifestGenerator` | Emits a queued Scene Foundry manifest and asset slot. Blender/Ray execution remains a downstream renderer integration. |
 | 8. Spec Persistence + Public Surface | `civic-atlas-outbox-worker` | `reconstruction_jobs` persist generated specs to PostGIS and can auto-approve to `building_parts`, `generated_assets`, and projection outbox. |
+
+Additional projection:
+
+| Surface | Runtime function | Current implementation |
+|---|---|---|
+| Pascal-style editor node tree | `reconstruction_spec_to_node_tree` | Projects canonical `ReconstructionSpec` into a flat node dictionary with stable IDs for Site, Building, Level, Mass, Facade, OpeningGrid, GroundFloor, Roof, Ornament, and TextureFace. This is an editor/correction/read-model projection only; specs and `building_parts` remain the write truth. |
+
+## Repo Boundary Clarification
+
+| Repo | Role |
+|---|---|
+| `our-civic-atlas-backend` | Long-running Rust/PostGIS service boundary, reconstruction truth, queue/orchestration, and replayable projection outbox. |
+| `civic-atlas-ingest` | Bursty Python/Ray-on-RunPod repo for OSM/Sanborn/assessor corpus ingestion, building-head train/infer, and Blender Scene Foundry. It writes through this backend and must not become a tenant-truth database. |
+| `Open-Flint-Atlas-main-release` | Public web app and resident-facing atlas/editor/read surface. |
 
 Validation evidence from this slice:
 
@@ -125,7 +139,7 @@ Explicit deviations:
 | RustyRed projection worker is an outbox intent, not a live RustyRed write. | This repo does not yet include the RustyRed projection client/job runner. The outbox preserves the required replay/idempotency boundary and keeps PostGIS as truth. | Implement the worker that drains `reconstruction_projection_outbox` and writes `BuildingPresence` summaries to RustyRed. |
 | Phase 2 gate data was not loaded into a live PostGIS instance. | No live `DATABASE_URL`/seed DB was provided in this run. | Run migrations, submit/approve the five Carriage Town specs, and capture SQL/gRPC evidence. |
 | `GetBlockSubgraph` does not yet return approved reconstruction parts. | The current spacetime-atlas handler still uses fixture data, not the new reconstruction read model. | Connect `GetBlockSubgraph` to approved PostGIS reconstruction specs and projected RustyRed summaries. |
-| Phase 3 remains blocked. | The Blender primitive repo, real Modal/S3 configuration, and frontend visual route/gate are outside this backend-only slice. | Build the primitive library, Modal renderer, backend render job queue, and frontend route with browser screenshots. |
+| Phase 3 remains blocked. | The Blender primitive repo, real Ray/S3 configuration, and frontend visual route/gate are outside this backend-only slice. | Build the primitive library, Ray renderer, backend render job queue, and frontend route with browser screenshots. |
 
 ## Explicit Non-Goals and Deferrals
 
