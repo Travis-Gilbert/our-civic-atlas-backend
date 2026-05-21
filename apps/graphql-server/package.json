@@ -12,6 +12,8 @@
   "dependencies": {
     "@bufbuild/protobuf": "^2.12.0",
     "@graphql-yoga/node": "^3.9.1",
+    "@grpc/grpc-js": "^1.14.4",
+    "@grpc/proto-loader": "^0.8.1",
     "dataloader": "^2.2.3",
     "graphql": "^16.14.0"
   },

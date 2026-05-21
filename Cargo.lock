@@ -295,6 +295,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tenant-resolver",
+ "theseus-client",
  "tokio",
  "tonic",
  "tonic-web",
