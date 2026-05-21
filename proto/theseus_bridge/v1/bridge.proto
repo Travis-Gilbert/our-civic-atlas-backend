@@ -79,6 +79,53 @@ message IngestArtifactResponse {
   string status = 2;
 }
 
+// Civic research / gap-driven fractal expansion. The Civic Atlas
+// GraphQL `Mutation.civicResearch` field is backed by this RPC.
+// Theseus opens a harness run on receipt, dispatches its
+// fractal-expansion algorithm against `query`, and returns the
+// evidence the algorithm surfaces in the SearchResults shape the
+// public atlas contract already exposes (places, signals, events,
+// historical reconstructions, sources).
+//
+// The Civic Atlas backend's GraphQL resolver does not call Theseus
+// directly; it calls Axum, which calls this RPC. That keeps service
+// credentials and TenantContext enforcement on the Axum side per
+// the Open-Flint-Atlas-main-release "Service-Tier Auth Stays
+// Server-Side" rule.
+message FractalExpansionRequest {
+  civic_atlas.v1.TenantContext tenant_context = 1;
+  string query = 2;
+  // Optional harness budget knobs (max_hops, frontier_width,
+  // max_tokens, wall_clock_seconds). Serialized as JSON because
+  // the harness budget vocabulary evolves faster than this proto
+  // can re-version. Theseus parses it on receipt.
+  string budget_json = 3;
+  // Optional scope hints (era, bbox, place_ids, source_ids,
+  // min_confidence). Same JSON-serialized rationale as budget_json.
+  string scope_json = 4;
+  // Optional grouping for cross-call caching and follow-up steps.
+  string session_id = 5;
+  // Optional folio id when the call is part of a curated workspace.
+  string folio_id = 6;
+}
+
+message FractalExpansionResponse {
+  // The Theseus harness run identifier this query attached to.
+  // Stable for the lifetime of the run; useful for replay, compare,
+  // and follow-up calls.
+  string run_id = 1;
+  // Skill the harness executed (typically "fractal_expansion").
+  // Surfaces in the GraphQL payload so the frontend can adapt
+  // presentation when alternative skills dispatch in the future.
+  string skill = 2;
+  // The evidence the algorithm surfaced, serialized as JSON
+  // matching the public `SearchResults` GraphQL type. Theseus
+  // normalizes the harness internals into this shape before
+  // return so the Axum/Node sidecar layers do not depend on
+  // harness response internals.
+  string results_json = 3;
+}
+
 service TheseusBridge {
   rpc ResolveSpacetimeTopic(SpacetimeTopicRequest) returns (stream SpacetimeTopicChunk);
   rpc GetSpacetimeEmbedding(SpacetimeEmbeddingRequest) returns (SpacetimeEmbeddingResponse);
@@ -88,4 +135,7 @@ service TheseusBridge {
   rpc GetBatchSpacetimeEmbeddings(BatchSpacetimeEmbeddingRequest) returns (BatchSpacetimeEmbeddingResponse);
   rpc SearchObjects(SearchObjectsRequest) returns (SearchObjectsResponse);
   rpc IngestArtifact(IngestArtifactRequest) returns (IngestArtifactResponse);
+  // Civic research entrypoint. Backs `Mutation.civicResearch` in
+  // the public Civic Atlas GraphQL contract.
+  rpc FractalExpansion(FractalExpansionRequest) returns (FractalExpansionResponse);
 }

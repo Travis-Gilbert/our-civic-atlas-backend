@@ -9,14 +9,16 @@ use std::{env, net::SocketAddr, sync::Arc};
 use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
 use civic_atlas_types::civic_atlas::v1::spacetime_atlas_service_server::SpacetimeAtlasService as SpacetimeAtlasGrpc;
 use civic_atlas_types::civic_atlas::v1::{
-    civic_atlas_service_server::CivicAtlasService, CivicObject, GetBlockSubgraphRequest,
-    GetBlockSubgraphResponse, GetDossierRequest, GetDossierResponse, GetNearbyArtifactsRequest,
-    GetNearbyArtifactsResponse, GetNodeRequest, GetNodeResponse, GetParcelHistoryRequest,
-    GetParcelHistoryResponse, GetPlaceRequest, GetPlaceResponse, GetViewportAtTimeRequest,
-    GetViewportAtTimeResponse, HealthRequest, HealthResponse, ListPlacesRequest,
-    ListPlacesResponse, ResolveTenantRequest, ResolveTenantResponse, TenantContext, TimeSlice,
-    ViewportBounds,
+    civic_atlas_service_server::CivicAtlasService, CivicObject, CivicResearchRequest,
+    CivicResearchResponse, GetBlockSubgraphRequest, GetBlockSubgraphResponse, GetDossierRequest,
+    GetDossierResponse, GetNearbyArtifactsRequest, GetNearbyArtifactsResponse, GetNodeRequest,
+    GetNodeResponse, GetParcelHistoryRequest, GetParcelHistoryResponse, GetPlaceRequest,
+    GetPlaceResponse, GetViewportAtTimeRequest, GetViewportAtTimeResponse, HealthRequest,
+    HealthResponse, ListPlacesRequest, ListPlacesResponse, ResolveTenantRequest,
+    ResolveTenantResponse, TenantContext, TimeSlice, ViewportBounds,
 };
+use civic_atlas_types::theseus_bridge::v1::FractalExpansionRequest as BridgeFractalExpansionRequest;
+use theseus_client::TheseusClient;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
@@ -223,6 +225,75 @@ impl CivicAtlasService for CivicAtlasGrpcService {
             status: "ok".to_string(),
             service: "civic-atlas-server".to_string(),
             tenant_id: tenant.as_str().to_string(),
+        }))
+    }
+
+    /// Civic research (gap-driven fractal expansion). Fans out to the
+    /// Theseus bridge_server over gRPC. Backs the Node sidecar's
+    /// `Mutation.civicResearch` GraphQL resolver.
+    ///
+    /// TenantContext is required on every call (per the multi-tenancy
+    /// invariant) and is forwarded verbatim to the Theseus bridge so
+    /// the harness run is tenant-scoped.
+    ///
+    /// Connection model: dial Theseus on every call. The expected
+    /// usage pattern is one call per user research query (low rate,
+    /// long tail), so the dial cost is acceptable. If call volume
+    /// grows, hold a long-lived `TheseusClient` on `AtlasState` and
+    /// reuse it; the wrapper crate already exposes `.connect()` for
+    /// that pattern.
+    ///
+    /// Failure modes:
+    /// - `Status::unauthenticated` when TenantContext is missing.
+    /// - `Status::unavailable` when `THESEUS_BRIDGE_URL` is unset OR
+    ///   the bridge process is unreachable. The Node sidecar surfaces
+    ///   this as a GraphQL error; the frontend renders it as an
+    ///   honest network-error state.
+    /// - `Status::internal` when the bridge accepts the call but the
+    ///   downstream harness errors.
+    async fn civic_research(
+        &self,
+        request: Request<CivicResearchRequest>,
+    ) -> Result<Response<CivicResearchResponse>, Status> {
+        let request = request.into_inner();
+        require_tenant_context(request.tenant_context.as_ref())
+            .map_err(|err| Status::unauthenticated(err.to_string()))?;
+
+        let bridge_url = env::var("THESEUS_BRIDGE_URL").map_err(|_| {
+            Status::unavailable(
+                "civic research is unavailable: THESEUS_BRIDGE_URL is not configured",
+            )
+        })?;
+
+        let mut client = TheseusClient::connect(bridge_url).await.map_err(|err| {
+            Status::unavailable(format!("theseus bridge unreachable: {err}"))
+        })?;
+
+        let bridge_request = BridgeFractalExpansionRequest {
+            tenant_context: request.tenant_context.clone(),
+            query: request.query,
+            budget_json: request.budget_json,
+            scope_json: request.scope_json,
+            session_id: request.session_id,
+            folio_id: request.folio_id,
+        };
+
+        let bridge_response = client
+            .inner()
+            .fractal_expansion(bridge_request)
+            .await
+            .map_err(|status| {
+                Status::internal(format!(
+                    "theseus fractal_expansion call failed: {}",
+                    status.message()
+                ))
+            })?
+            .into_inner();
+
+        Ok(Response::new(CivicResearchResponse {
+            run_id: bridge_response.run_id,
+            skill: bridge_response.skill,
+            results_json: bridge_response.results_json,
         }))
     }
 }

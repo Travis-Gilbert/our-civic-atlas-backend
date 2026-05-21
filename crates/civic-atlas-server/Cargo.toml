@@ -15,6 +15,7 @@ serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tenant-resolver = { path = "../tenant-resolver" }
+theseus-client = { path = "../theseus-client" }
 tokio.workspace = true
 tonic.workspace = true
 tonic-web.workspace = true
