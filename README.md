@@ -43,6 +43,14 @@ Theseus bridge clients.
   queue for running the procedural reconstruction algorithm.
 - `migrations/0007_zoning_envelope_schema.sql` creates the tenant-scoped
   Phase C zoning source, rule, boundary, and buildable-envelope tables.
+- `migrations/0008_scenario_branching_schema.sql` creates tenant-scoped
+  Phase D scenario and scenario override tables, including seeded `current`
+  rows for existing tenants.
+- `migrations/0009_kpi_service_schema.sql` creates tenant-scoped Phase E
+  multiplier, KPI definition, demographic baseline, and KPI result tables.
+- `migrations/0010_scenario_kpi_runtime_queries.sql` adds stable SQL query
+  functions for scenario envelope inheritance, envelope deltas, and latest KPI
+  bundles.
 - `crates/civic-atlas-cli` provisions tenant rows and runtime namespace rows in
   one transaction, validates ReconstructionSpec JSON, and submits specs for
   review.
