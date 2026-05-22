@@ -3,14 +3,22 @@ import { createSchema } from "graphql-yoga";
 
 import {
   CivicAtlasGrpcClient,
+  EventPlannerGrpcClient,
   type CivicObject,
   type TenantContext,
 } from "./grpcClient.js";
+import {
+  eventPlannerResolvers,
+  eventPlannerTypeDefs,
+} from "./schema/event-planner/index.js";
 
 export interface GraphqlContext {
   readonly client: CivicAtlasGrpcClient;
+  readonly eventPlanner: EventPlannerGrpcClient;
   readonly placesLoader: DataLoader<string, readonly CivicObject[]>;
   readonly defaultTenant: TenantContext;
+  /** Active planner user id resolved from the session cookie, if any. */
+  readonly actorUserId: string | null;
 }
 
 type ScenarioRecord = {
@@ -185,11 +193,17 @@ function defaultTenantFromEnv(): TenantContext {
   return { tenantId, atlasNodeId: `atlas:${tenantId}` };
 }
 
-export function buildContext(client: CivicAtlasGrpcClient): GraphqlContext {
+export function buildContext(
+  client: CivicAtlasGrpcClient,
+  eventPlanner: EventPlannerGrpcClient,
+  options: { actorUserId?: string | null } = {},
+): GraphqlContext {
   const defaultTenant = defaultTenantFromEnv();
   return {
     client,
+    eventPlanner,
     defaultTenant,
+    actorUserId: options.actorUserId ?? null,
     placesLoader: new DataLoader(async (tenantIds: readonly string[]) =>
       Promise.all(
         tenantIds.map((tenantId) =>
@@ -236,8 +250,7 @@ function parseSearchResults(resultsJson: string, query: string) {
   };
 }
 
-export const schema = createSchema<GraphqlContext>({
-  typeDefs: /* GraphQL */ `
+const coreTypeDefs = /* GraphQL */ `
     scalar JSON
     scalar DateTime
     scalar GeoJSON
@@ -423,8 +436,9 @@ export const schema = createSchema<GraphqlContext>({
       publishScenario(tenantId: ID!, scenarioId: ID!): Scenario!
       archiveScenario(tenantId: ID!, scenarioId: ID!): Scenario!
     }
-  `,
-  resolvers: {
+  `;
+
+const coreResolvers = {
     Query: {
       health: () => ({
         status: "ok",
@@ -574,6 +588,23 @@ export const schema = createSchema<GraphqlContext>({
         state: "archived",
         updatedAt: new Date().toISOString(),
       }),
+    },
+};
+
+// Compose the two modules into one schema. graphql-yoga's createSchema
+// (backed by graphql-tools' makeExecutableSchema) accepts an array of
+// type-def strings and merges them; we merge resolvers explicitly so
+// the per-type maps (Query, Mutation, etc.) combine cleanly.
+export const schema = createSchema<GraphqlContext>({
+  typeDefs: [coreTypeDefs, eventPlannerTypeDefs],
+  resolvers: {
+    Query: {
+      ...coreResolvers.Query,
+      ...eventPlannerResolvers.Query,
+    },
+    Mutation: {
+      ...coreResolvers.Mutation,
+      ...eventPlannerResolvers.Mutation,
     },
   },
 });

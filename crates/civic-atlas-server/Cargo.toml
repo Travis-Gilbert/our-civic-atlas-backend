@@ -13,6 +13,7 @@ civic-atlas-types = { path = "../civic-atlas-types" }
 prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 tenant-resolver = { path = "../tenant-resolver" }
 theseus-client = { path = "../theseus-client" }

@@ -1,4 +1,6 @@
 pub mod corrections;
+pub mod event_planner;
+pub mod event_planner_auth;
 pub mod fixture;
 pub mod reconstruction;
 pub mod tenant_db;
