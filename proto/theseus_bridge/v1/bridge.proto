@@ -79,26 +79,27 @@ message IngestArtifactResponse {
   string status = 2;
 }
 
-// Civic research / gap-driven fractal expansion. The Civic Atlas
-// GraphQL `Mutation.civicResearch` field is backed by this RPC.
-// Theseus opens a harness run on receipt, dispatches its
-// fractal-expansion algorithm against `query`, and returns the
-// evidence the algorithm surfaces in the SearchResults shape the
-// public atlas contract already exposes (places, signals, events,
-// historical reconstructions, sources).
+// Civic research search. Backs the Civic Atlas GraphQL
+// `Mutation.civicResearch` field through the Axum civic-atlas-server.
+//
+// Implementation: thin gRPC wrapper around Theseus's compose engine
+// (`apps.notebook.ask_pipeline.ask_theseus`). Does NOT go through the
+// Theseus harness; does NOT read from RustyRedCore-THG. Reads from
+// Theseus's own knowledge-graph store (PostgreSQL + FAISS) via the
+// compose engine's documented external retrieval contract.
 //
 // The Civic Atlas backend's GraphQL resolver does not call Theseus
 // directly; it calls Axum, which calls this RPC. That keeps service
 // credentials and TenantContext enforcement on the Axum side per
 // the Open-Flint-Atlas-main-release "Service-Tier Auth Stays
 // Server-Side" rule.
-message FractalExpansionRequest {
+message SearchRequest {
   civic_atlas.v1.TenantContext tenant_context = 1;
   string query = 2;
-  // Optional harness budget knobs (max_hops, frontier_width,
-  // max_tokens, wall_clock_seconds). Serialized as JSON because
-  // the harness budget vocabulary evolves faster than this proto
-  // can re-version. Theseus parses it on receipt.
+  // Optional compose engine knobs (top_n, operating_point,
+  // neural_tier, include_web, etc.). Serialized as JSON because
+  // the compose engine parameter vocabulary evolves faster than
+  // this proto can re-version. Theseus parses it on receipt.
   string budget_json = 3;
   // Optional scope hints (era, bbox, place_ids, source_ids,
   // min_confidence). Same JSON-serialized rationale as budget_json.
@@ -109,20 +110,22 @@ message FractalExpansionRequest {
   string folio_id = 6;
 }
 
-message FractalExpansionResponse {
-  // The Theseus harness run identifier this query attached to.
-  // Stable for the lifetime of the run; useful for replay, compare,
-  // and follow-up calls.
+message SearchResponse {
+  // Compose engine trace identifier this query attached to. Stable
+  // for the lifetime of the trace; useful for replay, compare, and
+  // follow-up calls. Field name kept as `run_id` so the public
+  // GraphQL contract (`runId`) stays stable across implementation
+  // changes.
   string run_id = 1;
-  // Skill the harness executed (typically "fractal_expansion").
-  // Surfaces in the GraphQL payload so the frontend can adapt
-  // presentation when alternative skills dispatch in the future.
+  // Compose engine method that ran (e.g. "compose_search",
+  // "compose_with_reasoning"). Field name kept as `skill` so the
+  // public GraphQL contract (`skill`) stays stable.
   string skill = 2;
   // The evidence the algorithm surfaced, serialized as JSON
   // matching the public `SearchResults` GraphQL type. Theseus
-  // normalizes the harness internals into this shape before
-  // return so the Axum/Node sidecar layers do not depend on
-  // harness response internals.
+  // normalizes the compose engine output into this shape before
+  // return so the Axum/Node sidecar layers do not depend on the
+  // compose engine's internal response shape.
   string results_json = 3;
 }
 
@@ -136,6 +139,7 @@ service TheseusBridge {
   rpc SearchObjects(SearchObjectsRequest) returns (SearchObjectsResponse);
   rpc IngestArtifact(IngestArtifactRequest) returns (IngestArtifactResponse);
   // Civic research entrypoint. Backs `Mutation.civicResearch` in
-  // the public Civic Atlas GraphQL contract.
-  rpc FractalExpansion(FractalExpansionRequest) returns (FractalExpansionResponse);
+  // the public Civic Atlas GraphQL contract. Routes to Theseus's
+  // compose engine (NOT the harness, NOT RustyRedCore-THG).
+  rpc Search(SearchRequest) returns (SearchResponse);
 }

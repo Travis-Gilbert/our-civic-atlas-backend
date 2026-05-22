@@ -79,28 +79,36 @@ message HealthResponse {
   string tenant_id = 3;
 }
 
-// Civic research (gap-driven fractal expansion). Axum's outward
-// face for the Node sidecar's `Mutation.civicResearch` resolver.
+// Civic research. Axum's outward face for the Node sidecar's
+// `Mutation.civicResearch` resolver.
 //
 // Wire flow:
 //   Node sidecar GraphQL resolver
 //     -> CivicAtlasService.CivicResearch (this RPC, native gRPC)
 //     -> theseus-client crate
-//     -> TheseusBridge.FractalExpansion (Index-API bridge_server.py)
-//     -> Theseus harness fractal_expansion skill
+//     -> TheseusBridge.Search (Index-API bridge_server.py)
+//     -> Theseus compose engine (apps.notebook.ask_pipeline.ask_theseus)
+//
+// The compose engine reads from Theseus's own knowledge-graph store
+// (PostgreSQL + FAISS). It is NOT the Theseus harness and does NOT
+// touch RustyRedCore-THG; the harness is for Theseus-internal
+// orchestration, THG is harness-bound. External consumers like Civic
+// Atlas go through compose engine, which is Theseus's documented
+// external retrieval contract.
 //
 // Why Axum owns this RPC instead of the sidecar calling Theseus
 // directly: TenantContext enforcement, future caching against PostGIS
-// or RustyRed, and the project rule "Service-Tier Auth Stays
-// Server-Side". Harness credentials live in this process, never in
+// or civic-atlas RustyRed (the project's own RustyRed deployment, not
+// Theseus's THG), and the project rule "Service-Tier Auth Stays
+// Server-Side". Theseus credentials live in this process, never in
 // the sidecar or the browser.
 message CivicResearchRequest {
   TenantContext tenant_context = 1;
   string query = 2;
-  // Optional harness budget knobs (max_hops, frontier_width,
-  // max_tokens, wall_clock_seconds). Forwarded verbatim as JSON to
-  // Theseus's harness; the budget vocabulary evolves faster than
-  // this proto can re-version.
+  // Optional compose engine knobs (top_n, operating_point,
+  // neural_tier, include_web). Forwarded verbatim as JSON; the
+  // compose engine vocabulary evolves faster than this proto can
+  // re-version.
   string budget_json = 3;
   // Optional scope hints (era, bbox, place_ids, source_ids,
   // min_confidence). Same JSON-serialization rationale.
@@ -112,9 +120,12 @@ message CivicResearchRequest {
 }
 
 message CivicResearchResponse {
-  // Theseus harness run identifier; useful for replay / compare.
+  // Compose engine trace identifier; useful for replay / compare.
+  // Field name kept as `run_id` so the GraphQL contract (`runId`)
+  // stays stable across implementation changes.
   string run_id = 1;
-  // Skill the harness executed (typically "fractal_expansion").
+  // Compose engine method that ran (e.g. "compose_search").
+  // Field name kept as `skill` so the GraphQL contract stays stable.
   string skill = 2;
   // Evidence the algorithm returned, serialized as JSON matching
   // the public `SearchResults` GraphQL type so the Node sidecar
@@ -129,11 +140,12 @@ service CivicAtlasService {
   rpc GetDossier(GetDossierRequest) returns (GetDossierResponse);
   rpc ResolveTenant(ResolveTenantRequest) returns (ResolveTenantResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
-  // Civic research entrypoint. Fans out to Theseus via the
-  // theseus-client crate's gRPC connection. Future iterations may
+  // Civic research entrypoint. Fans out to Theseus's compose engine
+  // via the theseus-client crate's gRPC connection (Search RPC). NOT
+  // the harness path; NOT RustyRedCore-THG. Future iterations may
   // decorate the response with civic atlas data (per-place geometry
-  // hydration, RustyRed hot-graph augmentation) before returning
-  // to the sidecar.
+  // hydration from PostGIS, civic-atlas RustyRed hot-graph
+  // augmentation) before returning to the sidecar.
   rpc CivicResearch(CivicResearchRequest) returns (CivicResearchResponse);
 }
 

@@ -17,7 +17,7 @@ use civic_atlas_types::civic_atlas::v1::{
     HealthResponse, ListPlacesRequest, ListPlacesResponse, ResolveTenantRequest,
     ResolveTenantResponse, TenantContext, TimeSlice, ViewportBounds,
 };
-use civic_atlas_types::theseus_bridge::v1::FractalExpansionRequest as BridgeFractalExpansionRequest;
+use civic_atlas_types::theseus_bridge::v1::SearchRequest as BridgeSearchRequest;
 use theseus_client::TheseusClient;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -228,13 +228,15 @@ impl CivicAtlasService for CivicAtlasGrpcService {
         }))
     }
 
-    /// Civic research (gap-driven fractal expansion). Fans out to the
-    /// Theseus bridge_server over gRPC. Backs the Node sidecar's
+    /// Civic research. Fans out to Theseus's compose engine via the
+    /// theseus-client crate's gRPC connection (TheseusBridge.Search).
+    /// Does NOT call the Theseus harness; does NOT read from
+    /// RustyRedCore-THG. Backs the Node sidecar's
     /// `Mutation.civicResearch` GraphQL resolver.
     ///
     /// TenantContext is required on every call (per the multi-tenancy
     /// invariant) and is forwarded verbatim to the Theseus bridge so
-    /// the harness run is tenant-scoped.
+    /// the compose engine call is tenant-scoped.
     ///
     /// Connection model: dial Theseus on every call. The expected
     /// usage pattern is one call per user research query (low rate,
@@ -269,7 +271,7 @@ impl CivicAtlasService for CivicAtlasGrpcService {
             Status::unavailable(format!("theseus bridge unreachable: {err}"))
         })?;
 
-        let bridge_request = BridgeFractalExpansionRequest {
+        let bridge_request = BridgeSearchRequest {
             tenant_context: request.tenant_context.clone(),
             query: request.query,
             budget_json: request.budget_json,
@@ -280,11 +282,11 @@ impl CivicAtlasService for CivicAtlasGrpcService {
 
         let bridge_response = client
             .inner()
-            .fractal_expansion(bridge_request)
+            .search(bridge_request)
             .await
             .map_err(|status| {
                 Status::internal(format!(
-                    "theseus fractal_expansion call failed: {}",
+                    "theseus compose engine search call failed: {}",
                     status.message()
                 ))
             })?
