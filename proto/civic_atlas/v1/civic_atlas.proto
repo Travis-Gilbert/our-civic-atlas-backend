@@ -86,15 +86,20 @@ message HealthResponse {
 //   Node sidecar GraphQL resolver
 //     -> CivicAtlasService.CivicResearch (this RPC, native gRPC)
 //     -> theseus-client crate
-//     -> TheseusBridge.Search (Index-API bridge_server.py)
-//     -> Theseus compose engine (apps.notebook.ask_pipeline.ask_theseus)
+//     -> theseus_search.v1.SearchService.Search
+//        (Index-API bridge_server.py hosts the SearchService impl)
+//     -> apps/orchestrate/runtime/search_kernel.py:SearchKernel
+//     -> apps/notebook/search/native/search.py:native_search
+//        (which composes apps/notebook/search/kernel/ + apps/notebook/web/)
 //
-// The compose engine reads from Theseus's own knowledge-graph store
-// (PostgreSQL + FAISS). It is NOT the Theseus harness and does NOT
-// touch RustyRedCore-THG; the harness is for Theseus-internal
-// orchestration, THG is harness-bound. External consumers like Civic
-// Atlas go through compose engine, which is Theseus's documented
-// external retrieval contract.
+// The Search RPC is the canonical theseus_search.v1 contract (vendored
+// from theorem-protos). Mode set to SEARCH_MODE_CIVIC_ATLAS so the
+// orchestrator dispatches gap-driven + web retrieval + source-pair as
+// the civic-atlas default behavior.
+//
+// NOT the Theseus harness; NOT RustyRedCore-THG; NOT the compose
+// engine. The search orchestrator is its own product surface, sibling
+// to the harness and to RustyRed.
 //
 // Why Axum owns this RPC instead of the sidecar calling Theseus
 // directly: TenantContext enforcement, future caching against PostGIS
@@ -105,13 +110,13 @@ message HealthResponse {
 message CivicResearchRequest {
   TenantContext tenant_context = 1;
   string query = 2;
-  // Optional compose engine knobs (top_n, operating_point,
-  // neural_tier, include_web). Forwarded verbatim as JSON; the
-  // compose engine vocabulary evolves faster than this proto can
-  // re-version.
+  // Optional search orchestrator knobs (top_k, min_confidence,
+  // source_pair, max_rounds, etc.). Forwarded verbatim as JSON
+  // because the orchestrator vocabulary can evolve faster than this
+  // proto can re-version. Civic-atlas defaults apply when empty.
   string budget_json = 3;
   // Optional scope hints (era, bbox, place_ids, source_ids,
-  // min_confidence). Same JSON-serialization rationale.
+  // min_confidence, providers). Same JSON-serialization rationale.
   string scope_json = 4;
   // Optional session id for cross-call caching and follow-up.
   string session_id = 5;
@@ -120,16 +125,17 @@ message CivicResearchRequest {
 }
 
 message CivicResearchResponse {
-  // Compose engine trace identifier; useful for replay / compare.
-  // Field name kept as `run_id` so the GraphQL contract (`runId`)
-  // stays stable across implementation changes.
+  // Search orchestrator trace identifier; useful for replay / compare
+  // and for the future Provenance() lookup. Field name kept as
+  // `run_id` so the GraphQL contract (`runId`) stays stable across
+  // implementation changes.
   string run_id = 1;
-  // Compose engine method that ran (e.g. "compose_search").
+  // Orchestrator mode that ran (e.g. "civic_atlas", "deep", "ask").
   // Field name kept as `skill` so the GraphQL contract stays stable.
   string skill = 2;
-  // Evidence the algorithm returned, serialized as JSON matching
-  // the public `SearchResults` GraphQL type so the Node sidecar
-  // can pass it through to the browser unchanged.
+  // Evidence the orchestrator returned, serialized as JSON matching
+  // the public `SearchResults` GraphQL type so the Node sidecar can
+  // pass it through to the browser unchanged.
   string results_json = 3;
 }
 
@@ -140,12 +146,13 @@ service CivicAtlasService {
   rpc GetDossier(GetDossierRequest) returns (GetDossierResponse);
   rpc ResolveTenant(ResolveTenantRequest) returns (ResolveTenantResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
-  // Civic research entrypoint. Fans out to Theseus's compose engine
-  // via the theseus-client crate's gRPC connection (Search RPC). NOT
-  // the harness path; NOT RustyRedCore-THG. Future iterations may
-  // decorate the response with civic atlas data (per-place geometry
-  // hydration from PostGIS, civic-atlas RustyRed hot-graph
-  // augmentation) before returning to the sidecar.
+  // Civic research entrypoint. Fans out to Theseus's search
+  // orchestrator via the theseus-client crate's gRPC connection
+  // (theseus_search.v1.SearchService.Search with mode=CIVIC_ATLAS).
+  // NOT the harness path; NOT RustyRedCore-THG; NOT compose engine.
+  // Future iterations may decorate the response with civic atlas data
+  // (per-place geometry hydration from PostGIS, civic-atlas RustyRed
+  // hot-graph augmentation) before returning to the sidecar.
   rpc CivicResearch(CivicResearchRequest) returns (CivicResearchResponse);
 }
 

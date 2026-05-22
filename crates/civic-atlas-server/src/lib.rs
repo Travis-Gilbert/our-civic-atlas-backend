@@ -17,7 +17,9 @@ use civic_atlas_types::civic_atlas::v1::{
     HealthResponse, ListPlacesRequest, ListPlacesResponse, ResolveTenantRequest,
     ResolveTenantResponse, TenantContext, TimeSlice, ViewportBounds,
 };
-use civic_atlas_types::theseus_bridge::v1::SearchRequest as BridgeSearchRequest;
+use civic_atlas_types::theseus_search::v1::{
+    SearchMode as TheseusSearchMode, SearchRequest as TheseusSearchRequest,
+};
 use theseus_client::TheseusClient;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -271,33 +273,105 @@ impl CivicAtlasService for CivicAtlasGrpcService {
             Status::unavailable(format!("theseus bridge unreachable: {err}"))
         })?;
 
-        let bridge_request = BridgeSearchRequest {
-            tenant_context: request.tenant_context.clone(),
+        // Map the public CivicResearchRequest into the canonical
+        // theseus_search.v1.SearchRequest. Mode is fixed at
+        // SEARCH_MODE_CIVIC_ATLAS so the orchestrator dispatches
+        // gap-driven + source-paired + web retrieval as the civic-atlas
+        // default behavior. budget_json + scope_json are reserved for
+        // future knob passthrough (top_k overrides, bbox, time_range);
+        // for now they ride into the orchestrator via the JSON fields
+        // on the response side. user_id stays empty because civic-atlas
+        // does not yet pass an authenticated user identifier through
+        // the panel; tenant_id rides on the request's tenant_context
+        // (enforced at the resolver entry above).
+        let search_request = TheseusSearchRequest {
             query: request.query,
-            budget_json: request.budget_json,
-            scope_json: request.scope_json,
+            mode: TheseusSearchMode::CivicAtlas as i32,
+            user_id: String::new(),
             session_id: request.session_id,
-            folio_id: request.folio_id,
+            bbox: Vec::new(),
+            time_range: Vec::new(),
+            min_confidence: 0.0,
+            source_pair: true,
+            top_k: 0,
         };
 
-        let bridge_response = client
-            .inner()
-            .search(bridge_request)
+        let search_response = client
+            .search()
+            .search(search_request)
             .await
             .map_err(|status| {
                 Status::internal(format!(
-                    "theseus compose engine search call failed: {}",
+                    "theseus search orchestrator call failed: {}",
                     status.message()
                 ))
             })?
             .into_inner();
 
+        // Map theseus_search.v1.SearchResponse back into the public
+        // CivicResearchResponse. The orchestrator returns structured
+        // SearchResult lists (prior_knowledge, new_evidence) plus gap
+        // closures and a provenance pointer; the public GraphQL
+        // contract today still ships these as a JSON blob under
+        // results_json so the Node sidecar can pass it through to the
+        // browser unchanged. When the GraphQL schema grows typed
+        // resolvers for prior_knowledge / new_evidence / gap_closures,
+        // this serialization moves into a typed mapping; for now it
+        // preserves the wire contract Civic Atlas already consumes.
+        let results_json = serde_json::to_string(&json!({
+            "query": search_response.query,
+            "totalReturned": search_response.total_returned,
+            "totalAdmitted": search_response.total_admitted,
+            "roundsExecuted": search_response.rounds_executed,
+            "latencyMs": search_response.latency_ms,
+            "priorKnowledge": search_response
+                .prior_knowledge
+                .iter()
+                .map(search_result_to_json)
+                .collect::<Vec<_>>(),
+            "newEvidence": search_response
+                .new_evidence
+                .iter()
+                .map(search_result_to_json)
+                .collect::<Vec<_>>(),
+            "gapClosures": search_response
+                .gap_closures
+                .iter()
+                .map(|gap| {
+                    json!({
+                        "gapId": gap.gap_id,
+                        "description": gap.description,
+                        "closed": gap.closed,
+                        "evidenceCount": gap.evidence_count,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "provenanceRootId": search_response.provenance_root_id,
+        }))
+        .unwrap_or_else(|_| String::from("{}"));
+
         Ok(Response::new(CivicResearchResponse {
-            run_id: bridge_response.run_id,
-            skill: bridge_response.skill,
-            results_json: bridge_response.results_json,
+            run_id: search_response.provenance_root_id,
+            skill: String::from("civic_atlas"),
+            results_json,
         }))
     }
+}
+
+fn search_result_to_json(
+    result: &civic_atlas_types::theseus_search::v1::SearchResult,
+) -> serde_json::Value {
+    json!({
+        "resultId": result.result_id,
+        "kind": result.kind,
+        "label": result.label,
+        "snippet": result.snippet,
+        "relevanceScore": result.relevance_score,
+        "confidence": result.confidence,
+        "source": result.source,
+        "url": result.url,
+        "closesGapId": result.closes_gap_id,
+    })
 }
 
 #[tonic::async_trait]

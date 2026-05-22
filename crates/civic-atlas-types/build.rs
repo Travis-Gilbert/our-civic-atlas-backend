@@ -10,6 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "../../proto/civic_atlas/v1/spacetime_atlas.proto",
             "../../proto/civic_atlas/v1/corrections.proto",
             "../../proto/theseus_bridge/v1/bridge.proto",
+            "../../proto/theseus_search/v1/search.proto",
         ],
         &["../../proto"],
     )?;
@@ -20,5 +21,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=../../proto/civic_atlas/v1/spacetime_atlas.proto");
     println!("cargo:rerun-if-changed=../../proto/civic_atlas/v1/corrections.proto");
     println!("cargo:rerun-if-changed=../../proto/theseus_bridge/v1/bridge.proto");
+    println!("cargo:rerun-if-changed=../../proto/theseus_search/v1/search.proto");
     Ok(())
 }

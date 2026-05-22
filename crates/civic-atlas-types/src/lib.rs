@@ -9,3 +9,9 @@ pub mod theseus_bridge {
         tonic::include_proto!("theseus_bridge.v1");
     }
 }
+
+pub mod theseus_search {
+    pub mod v1 {
+        tonic::include_proto!("theseus_search.v1");
+    }
+}

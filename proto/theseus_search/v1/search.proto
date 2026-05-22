@@ -1,0 +1,223 @@
+// Copyright 2026 Travis Gilbert. MIT licensed.
+//
+// theseus-search gRPC contract.
+//
+// The search orchestrator. Sits ABOVE theorems-harness (which provides
+// storage + agent identity) and ABOVE rustyred.v1 (which provides graph
+// + vector ops). theseus-search is its own product surface — a gap-driven,
+// graph-seeded, web-fed, epistemically-admitted, iteratively-refined
+// retrieval system that other agents and applications consume.
+//
+// The architecture is procedural — no LLM router in the loop for the
+// gap-walk or stopping decisions. Rerankers fire at two structural
+// points (mid-loop frame check + end condensation). See PRINCIPLES.md
+// P-001 ("Novelty over familiarity in ranking") in the Theseus repo
+// for the design rationale.
+//
+// Versioning: theseus_search.v1 is the first stable contract. The four
+// services below ship as stubs initially and gain implementation as the
+// gap-walk module (R4) and source-provider catalog (R5) land.
+
+syntax = "proto3";
+
+package theseus_search.v1;
+
+
+// ============================================================================
+// Service: SearchService
+// ============================================================================
+
+service SearchService {
+  // ---- Primary surface -----------------------------------------------------
+  // search() is the single entry point. Mode + context determine which
+  // retrievers run and how decomposition happens. The orchestrator decides
+  // whether to fire gap-walk based on query characteristics + mode hints.
+  rpc Search(SearchRequest) returns (SearchResponse);
+
+  // ---- Lower-level surfaces ------------------------------------------------
+  // gapWalk() exposes the gap-driven retrieval primitive directly for
+  // callers that want to control the loop. Used by the orchestrator
+  // internally; also useful for research-mode UIs that surface "what
+  // gaps did we close on this query."
+  rpc GapWalk(GapWalkRequest) returns (GapWalkResponse);
+
+  // sourcePair() exposes the source-paired retrieval primitive — fan out
+  // to a curated source catalog + a wide web search, then admit only the
+  // candidates that anchor to authority. Used by Civic Atlas-shape queries
+  // where the curated source catalog is dense.
+  rpc SourcePair(SourcePairRequest) returns (SourcePairResponse);
+
+  // provenance() returns the full evidence-and-gap-closure history for a
+  // given graph node admitted via a search. The "shows its work" surface.
+  rpc Provenance(ProvenanceRequest) returns (ProvenanceGraph);
+}
+
+
+// ============================================================================
+// Search modes
+// ============================================================================
+
+enum SearchMode {
+  SEARCH_MODE_UNSPECIFIED = 0;
+  // Real-time UX. Single round, no gap-walk by default. Cheap rerank only.
+  SEARCH_MODE_ASK = 1;
+  // Deep research. Up to 3 gap-walk rounds. Full mid + end rerank.
+  SEARCH_MODE_DEEP = 2;
+  // Encode-time bulk retrieval. Different latency profile.
+  SEARCH_MODE_ENCODE = 3;
+  // Civic-atlas: deep + source-paired by default.
+  SEARCH_MODE_CIVIC_ATLAS = 4;
+}
+
+
+// ============================================================================
+// Primary search
+// ============================================================================
+
+message SearchRequest {
+  string query = 1;
+  SearchMode mode = 2;
+  string user_id = 3;
+  string session_id = 4;
+  // Optional bounding box [min_lat, min_lon, max_lat, max_lon].
+  repeated double bbox = 5;
+  // Optional time range [start_unix_ms, end_unix_ms].
+  repeated int64 time_range = 6;
+  // Optional confidence floor (0.0–1.0). Default 0.6.
+  double min_confidence = 7;
+  // Optional source-pairing toggle. Auto-set by mode but explicit override
+  // available. Default: civic-atlas mode = true, others = false.
+  bool source_pair = 8;
+  // Maximum results to return after end-rerank condensation.
+  uint32 top_k = 9;
+}
+
+message SearchResponse {
+  string query = 1;
+  uint32 total_admitted = 2;
+  uint32 total_returned = 3;
+  // Original graph candidates that were on the system's mind before the
+  // search fired. The "what Theseus already knew" stream.
+  repeated SearchResult prior_knowledge = 4;
+  // New candidates admitted via gap-walk and/or source-pair this search.
+  repeated SearchResult new_evidence = 5;
+  // Gaps that triggered sub-queries, with closure state.
+  repeated GapClosure gap_closures = 6;
+  // Provenance pointer — call Provenance() with this to get the full
+  // evidence trail for any result_id.
+  string provenance_root_id = 7;
+  uint32 rounds_executed = 8;
+  uint64 latency_ms = 9;
+}
+
+message SearchResult {
+  string result_id = 1;
+  // Type marker — "node", "claim", "source", "place", etc.
+  string kind = 2;
+  string label = 3;
+  string snippet = 4;
+  double relevance_score = 5;   // post-end-rerank
+  double confidence = 6;        // epistemic confidence
+  // Source: "graph" (was already in corpus), "web" (gap-walk fetched),
+  // "source_pair" (curated provider fetched), "fusion" (multi-stream).
+  string source = 7;
+  // Optional URL when the result has a canonical web source.
+  string url = 8;
+  // Optional anchor: which gap (if any) this evidence closes.
+  string closes_gap_id = 9;
+}
+
+message GapClosure {
+  string gap_id = 1;
+  // Human-readable gap description: "1920s residential blocks in Carriage
+  // Town", "third source for the X/Y tension".
+  string description = 2;
+  bool closed = 3;
+  // How many new evidence items the system admitted that anchor to this gap.
+  uint32 evidence_count = 4;
+}
+
+
+// ============================================================================
+// Gap-walk (lower-level primitive)
+// ============================================================================
+
+message GapWalkRequest {
+  string query = 1;
+  string user_id = 2;
+  SearchMode mode = 3;
+  // Override the orchestrator's default depth caps for this call.
+  uint32 max_rounds = 4;
+  // PPR tuning — see PRINCIPLES.md P-001's gap-walk section.
+  double ppr_alpha = 5;
+  uint32 ppr_top_k = 6;
+}
+
+message GapWalkResponse {
+  repeated GapClosure gaps = 1;
+  repeated SearchResult admitted_evidence = 2;
+  uint32 rounds_executed = 3;
+  bool hit_round_cap = 4;
+  uint64 latency_ms = 5;
+}
+
+
+// ============================================================================
+// Source-pair (lower-level primitive)
+// ============================================================================
+
+message SourcePairRequest {
+  string query = 1;
+  // Bounded source catalog — only providers whose `matches(intent)`
+  // predicate returns true will fire. Empty = all matching providers.
+  repeated string providers = 2;
+  // Minimum cross-edges required for a web-side candidate to be admitted
+  // (must have ≥N anchors to a source-side candidate).
+  uint32 min_anchor_count = 3;
+  uint32 top_k = 4;
+}
+
+message SourcePairResponse {
+  repeated SearchResult source_candidates = 1;
+  repeated SearchResult web_candidates = 2;
+  // Web candidates that have ≥min_anchor_count anchors to source candidates.
+  repeated SearchResult anchored_results = 3;
+  // Web candidates with no source anchor (kept as exploratory).
+  repeated SearchResult exploratory_results = 4;
+}
+
+
+// ============================================================================
+// Provenance
+// ============================================================================
+
+message ProvenanceRequest {
+  string result_id = 1;
+  // Optional depth limit on the provenance graph traversal.
+  uint32 max_depth = 2;
+}
+
+message ProvenanceGraph {
+  repeated ProvenanceNode nodes = 1;
+  repeated ProvenanceEdge edges = 2;
+  // The result this provenance graph explains.
+  string root_result_id = 3;
+}
+
+message ProvenanceNode {
+  string node_id = 1;
+  // Type: "result", "gap", "ppr_seed", "source_anchor", "web_fetch",
+  // "rerank_input", "rerank_output".
+  string kind = 2;
+  string label = 3;
+  // JSON-encoded metadata (timestamps, scores, etc.).
+  string metadata_json = 4;
+}
+
+message ProvenanceEdge {
+  string from_node_id = 1;
+  string to_node_id = 2;
+  // Type: "seeded", "expanded_via_ppr", "templated_into_subquery",
+  // "fetched_by", "admitted_via", "anchors_to", "reranked_to".
+  string relationship = 3;
+}
