@@ -139,6 +139,37 @@ message CivicResearchResponse {
   string results_json = 3;
 }
 
+// Service-tier artifact persistence. This is not a browser-facing
+// capture route; it is the backend write contract used by ingest jobs
+// to land source-backed artifacts in the tenant-scoped PostGIS truth
+// tables. The payload_json string is stored verbatim in artifacts.payload_jsonb.
+message PersistArtifactRequest {
+  TenantContext tenant_context = 1;
+  string artifact_key = 2;
+  string source_type = 3;
+  string title = 4;
+  string uri = 5;
+  string citation = 6;
+  optional int64 captured_at_ms = 7;
+  string payload_json = 8;
+  // UUID or parcel_key. When present, the server resolves it against
+  // the tenant's parcels table and attaches the resulting parcel_id on
+  // the artifact anchor so direct parcel reconstruction can see it.
+  string parcel_ref = 9;
+  string building_id = 10;
+  string building_part_id = 11;
+  string anchor_kind = 12;
+  string anchor_geometry_wkt = 13;
+  optional int64 anchor_time_start_ms = 14;
+  optional int64 anchor_time_end_ms = 15;
+  string anchor_payload_json = 16;
+}
+
+message PersistArtifactResponse {
+  string artifact_id = 1;
+  string status = 2;
+}
+
 service CivicAtlasService {
   rpc GetPlace(GetPlaceRequest) returns (GetPlaceResponse);
   rpc ListPlaces(ListPlacesRequest) returns (ListPlacesResponse);
@@ -154,5 +185,7 @@ service CivicAtlasService {
   // (per-place geometry hydration from PostGIS, civic-atlas RustyRed
   // hot-graph augmentation) before returning to the sidecar.
   rpc CivicResearch(CivicResearchRequest) returns (CivicResearchResponse);
+  // Service-tier ingest boundary for artifact persistence. Intended
+  // for batch jobs and bridge processes, never for browser clients.
+  rpc PersistArtifact(PersistArtifactRequest) returns (PersistArtifactResponse);
 }
-
