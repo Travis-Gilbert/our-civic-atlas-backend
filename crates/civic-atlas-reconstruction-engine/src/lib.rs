@@ -172,6 +172,18 @@ pub enum DecodedArtifact {
         address: Option<String>,
         use_type: Option<String>,
     },
+    GisFeature {
+        footprint_wkt: Option<String>,
+        attributes: BTreeMap<String, Value>,
+        source_layer: Option<String>,
+        capture_date_ms: Option<i64>,
+    },
+    RasterTile {
+        footprint_wkt: Option<String>,
+        raster_uri: Option<String>,
+        band_count: Option<u32>,
+        capture_date_ms: Option<i64>,
+    },
     Text {
         text: String,
     },
@@ -636,6 +648,74 @@ pub fn extract_direct(
                     populated_fields.push("ground_floor.use_type".to_string());
                 }
             }
+            DecodedArtifact::GisFeature { attributes, .. } => {
+                let story_count = attribute_u32_any(
+                    attributes,
+                    &["stories", "story_count", "num_stories", "Cib_Storie", "Dwelling_U"],
+                );
+                let use_type = attribute_string_any(
+                    attributes,
+                    &["use_type", "Use_Type", "property_class", "Prop_Class", "LandUse"],
+                );
+                let primary_material = attribute_string_any(
+                    attributes,
+                    &["primary_material", "building_material", "material"],
+                );
+
+                if spec.mass.is_none() {
+                    spec.mass = Some(Mass {
+                        provenance: Some(provenance(artifact, 0.95, false, "GIS parcel feature")),
+                        form: "parcel polygon".to_string(),
+                        stories: story_count.unwrap_or_default(),
+                        ..Default::default()
+                    });
+                    populated_fields.push("mass.form".to_string());
+                    if story_count.is_some() {
+                        populated_fields.push("mass.stories".to_string());
+                    }
+                } else if let Some(mass) = spec.mass.as_mut() {
+                    if mass.stories == 0 {
+                        if let Some(story_count) = story_count {
+                            mass.stories = story_count;
+                            populated_fields.push("mass.stories".to_string());
+                        }
+                    }
+                }
+
+                if spec.facades.is_empty() {
+                    if let Some(primary_material) = primary_material {
+                        spec.facades.push(Facade {
+                            provenance: Some(provenance(
+                                artifact,
+                                0.91,
+                                false,
+                                "GIS assessor attribute",
+                            )),
+                            facade_side: "primary".to_string(),
+                            primary_material,
+                            ..Default::default()
+                        });
+                        populated_fields.push("facades[0].primary_material".to_string());
+                    }
+                }
+
+                if spec.ground_floor.is_none() {
+                    if let Some(use_type) = use_type {
+                        spec.ground_floor = Some(GroundFloor {
+                            provenance: Some(provenance(
+                                artifact,
+                                0.9,
+                                false,
+                                "GIS assessor attribute",
+                            )),
+                            use_type,
+                            ..Default::default()
+                        });
+                        populated_fields.push("ground_floor.use_type".to_string());
+                    }
+                }
+            }
+            DecodedArtifact::RasterTile { .. } => {}
             DecodedArtifact::Text { text } => {
                 if text.to_ascii_lowercase().contains("cornice") {
                     spec.ornaments.push(Ornament {
@@ -1088,7 +1168,7 @@ impl EmbeddingProvider for TheseusBatchEmbeddingProvider {
             .await
             .context("connecting to Theseus bridge")?;
         let response = client
-            .inner()
+            .bridge()
             .get_batch_spacetime_embeddings(Request::new(BatchSpacetimeEmbeddingRequest {
                 tenant_context: Some(tenant_context.clone()),
                 node_ids: node_ids.to_vec(),
@@ -1480,10 +1560,15 @@ fn sanborn_material(code: &str) -> &'static str {
 }
 
 fn source_type_from_str(source_type: &str) -> ReconstructionSourceType {
-    match source_type.to_ascii_lowercase().as_str() {
+    let normalized = source_type.to_ascii_lowercase();
+    if normalized == "gis_feature" || normalized.starts_with("gis_feature:") {
+        return ReconstructionSourceType::Survey;
+    }
+    match normalized.as_str() {
         "photo" | "archival_photo" | "archival-photo" => ReconstructionSourceType::ArchivalPhoto,
         "sanborn_sheet" | "sanborn" | "map" => ReconstructionSourceType::Map,
         "permit" => ReconstructionSourceType::Permit,
+        "assessor" | "parcel_record" => ReconstructionSourceType::Survey,
         "survey" => ReconstructionSourceType::Survey,
         "oral_history" | "oral-history" => ReconstructionSourceType::OralHistory,
         _ => ReconstructionSourceType::Other,
@@ -1904,6 +1989,40 @@ fn decode_artifact(source_type: &str, payload: &Value) -> DecodedArtifact {
             use_type: optional_string_any(payload, &["useType", "use_type"]),
         };
     }
+    if lower.contains("gis_feature") || lower.contains("assessor") || lower.contains("parcel_record") {
+        let attributes = payload
+            .get("attributes")
+            .or_else(|| payload.get("properties"))
+            .or_else(|| payload.as_object().map(|_| payload))
+            .and_then(Value::as_object)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        return DecodedArtifact::GisFeature {
+            footprint_wkt: optional_string_any(payload, &["footprintWkt", "footprint_wkt"]),
+            attributes,
+            source_layer: optional_string_any(payload, &["sourceLayer", "source_layer", "layer"]),
+            capture_date_ms: i64_any(
+                payload,
+                &["captureDateMs", "capture_date_ms", "capturedAtMs", "captured_at_ms"],
+            ),
+        };
+    }
+    if lower.contains("raster_tile") || lower.contains("wmts") || lower.contains("wms") {
+        return DecodedArtifact::RasterTile {
+            footprint_wkt: optional_string_any(payload, &["footprintWkt", "footprint_wkt"]),
+            raster_uri: optional_string_any(payload, &["rasterUri", "raster_uri", "uri"]),
+            band_count: u32_any(payload, &["bandCount", "band_count"]),
+            capture_date_ms: i64_any(
+                payload,
+                &["captureDateMs", "capture_date_ms", "capturedAtMs", "captured_at_ms"],
+            ),
+        };
+    }
     if let Some(text) = optional_string_any(payload, &["text", "ocrText", "ocr_text"]) {
         return DecodedArtifact::Text { text };
     }
@@ -2165,6 +2284,14 @@ fn optional_string_any(value: &Value, keys: &[&str]) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn attribute_string_any(attributes: &BTreeMap<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| attributes.get(*key))
+        .map(value_to_string)
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
 fn string_any(value: &Value, keys: &[&str]) -> String {
     optional_string_any(value, keys).unwrap_or_default()
 }
@@ -2174,6 +2301,12 @@ fn u32_any(value: &Value, keys: &[&str]) -> Option<u32> {
         .find_map(|key| value.get(*key))
         .and_then(Value::as_u64)
         .and_then(|number| u32::try_from(number).ok())
+}
+
+fn attribute_u32_any(attributes: &BTreeMap<String, Value>, keys: &[&str]) -> Option<u32> {
+    keys.iter()
+        .find_map(|key| attributes.get(*key))
+        .and_then(value_to_u32)
 }
 
 fn f64_any(value: &Value, keys: &[&str]) -> Option<f64> {
@@ -2201,6 +2334,24 @@ fn stable_id_fragment(value: &str) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_string()
+}
+
+fn value_to_string(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        Value::Bool(flag) => flag.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn value_to_u32(value: &Value) -> Option<u32> {
+    if let Some(number) = value.as_u64() {
+        return u32::try_from(number).ok();
+    }
+    value.as_str()
+        .and_then(|text| text.trim().parse::<f64>().ok())
+        .and_then(|number| u32::try_from(number as i64).ok())
 }
 
 fn reconstruction_node_id(spec: &ReconstructionSpec, field_path: &str) -> String {
@@ -3091,6 +3242,31 @@ mod tests {
         }
     }
 
+    fn gis_feature_artifact() -> Artifact {
+        Artifact {
+            artifact_id: "artifact:gis:1".to_string(),
+            artifact_key: "gis-1".to_string(),
+            source_type: "gis_feature".to_string(),
+            title: "City parcel record".to_string(),
+            uri: "https://example.test/parcel".to_string(),
+            citation: "Test GIS feature".to_string(),
+            captured_at_ms: Some(1),
+            fetched_at_ms: None,
+            content_hash: "hash-gis".to_string(),
+            decoded: DecodedArtifact::GisFeature {
+                footprint_wkt: Some("POLYGON ((0 0, 0 1, 1 1, 0 0))".to_string()),
+                attributes: BTreeMap::from([
+                    ("Cib_Storie".to_string(), json!("3")),
+                    ("Use_Type".to_string(), json!("commercial")),
+                    ("building_material".to_string(), json!("brick")),
+                ]),
+                source_layer: Some("Main_COF_Parcel".to_string()),
+                capture_date_ms: Some(1_735_689_600_000),
+            },
+            metadata: BTreeMap::new(),
+        }
+    }
+
     #[tokio::test]
     async fn full_pipeline_prefers_direct_fields_and_generates_manifest() {
         let repo = InMemoryRepository {
@@ -3152,6 +3328,53 @@ mod tests {
             .populated_fields
             .iter()
             .any(|field| field == "mass.stories"));
+    }
+
+    #[test]
+    fn gis_feature_replaces_footprint_fallback_with_high_confidence_fields() {
+        let evidence = EvidenceBundle {
+            focus_building: Some(CivicObject {
+                id: Uuid::nil().to_string(),
+                tenant_id: "flint".to_string(),
+                name: "building:ct-1".to_string(),
+                object_type: "BuildingPresence".to_string(),
+                geometry_json: "{\"type\":\"Polygon\"}".to_string(),
+                time_start_ms: Some(0),
+                time_end_ms: None,
+                confidence: 1.0,
+                source_ids: Vec::new(),
+                dossier_path: String::new(),
+                attributes: HashMap::new(),
+            }),
+            direct: vec![gis_feature_artifact()],
+            adjacent: Vec::new(),
+            temporal_predecessor: None,
+            temporal_successor: None,
+        };
+
+        let direct = extract_direct(&request(), &evidence).expect("direct extraction succeeds");
+        let mass = direct.spec.mass.expect("GIS feature should populate mass");
+
+        assert_eq!(mass.form, "parcel polygon");
+        assert_eq!(mass.stories, 3);
+        assert_eq!(mass.provenance.unwrap().part_confidence, 0.95);
+        assert_eq!(direct.spec.facades[0].primary_material, "brick");
+        assert_eq!(
+            direct.spec.ground_floor.unwrap().use_type,
+            "commercial"
+        );
+        assert!(direct
+            .populated_fields
+            .iter()
+            .any(|field| field == "mass.form"));
+    }
+
+    #[test]
+    fn source_type_from_str_accepts_gis_feature_prefix() {
+        assert_eq!(
+            source_type_from_str("gis_feature:ogc_api_features"),
+            ReconstructionSourceType::Survey
+        );
     }
 
     #[test]

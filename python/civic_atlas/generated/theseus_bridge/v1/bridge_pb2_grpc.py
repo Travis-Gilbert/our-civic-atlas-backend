@@ -26,7 +26,18 @@ if _version_not_supported:
 
 
 class TheseusBridgeStub(object):
-    """Missing associated documentation comment in .proto file."""
+    """Civic research search has moved off this proto. The canonical
+    contract is `theseus_search.v1.SearchService` (see
+    `proto/theseus_search/v1/search.proto`, vendored from
+    theorem-protos). The Axum civic-atlas-server's `CivicResearch`
+    resolver now calls `theseus_search.v1.SearchService.Search` with
+    `mode = SEARCH_MODE_CIVIC_ATLAS`.
+
+    `theseus_bridge.v1` keeps its spacetime + embeddings + artifact
+    RPCs below. Those are Theseus-bridge-specific concerns that are
+    not part of the search orchestrator product.
+
+    """
 
     def __init__(self, channel):
         """Constructor.
@@ -62,7 +73,18 @@ class TheseusBridgeStub(object):
 
 
 class TheseusBridgeServicer(object):
-    """Missing associated documentation comment in .proto file."""
+    """Civic research search has moved off this proto. The canonical
+    contract is `theseus_search.v1.SearchService` (see
+    `proto/theseus_search/v1/search.proto`, vendored from
+    theorem-protos). The Axum civic-atlas-server's `CivicResearch`
+    resolver now calls `theseus_search.v1.SearchService.Search` with
+    `mode = SEARCH_MODE_CIVIC_ATLAS`.
+
+    `theseus_bridge.v1` keeps its spacetime + embeddings + artifact
+    RPCs below. Those are Theseus-bridge-specific concerns that are
+    not part of the search orchestrator product.
+
+    """
 
     def ResolveSpacetimeTopic(self, request, context):
         """Missing associated documentation comment in .proto file."""
@@ -134,7 +156,18 @@ def add_TheseusBridgeServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class TheseusBridge(object):
-    """Missing associated documentation comment in .proto file."""
+    """Civic research search has moved off this proto. The canonical
+    contract is `theseus_search.v1.SearchService` (see
+    `proto/theseus_search/v1/search.proto`, vendored from
+    theorem-protos). The Axum civic-atlas-server's `CivicResearch`
+    resolver now calls `theseus_search.v1.SearchService.Search` with
+    `mode = SEARCH_MODE_CIVIC_ATLAS`.
+
+    `theseus_bridge.v1` keeps its spacetime + embeddings + artifact
+    RPCs below. Those are Theseus-bridge-specific concerns that are
+    not part of the search orchestrator product.
+
+    """
 
     @staticmethod
     def ResolveSpacetimeTopic(request,

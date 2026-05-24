@@ -64,6 +64,16 @@ class CivicAtlasServiceStub(object):
                 request_serializer=civic__atlas_dot_v1_dot_civic__atlas__pb2.HealthRequest.SerializeToString,
                 response_deserializer=civic__atlas_dot_v1_dot_civic__atlas__pb2.HealthResponse.FromString,
                 _registered_method=True)
+        self.CivicResearch = channel.unary_unary(
+                '/civic_atlas.v1.CivicAtlasService/CivicResearch',
+                request_serializer=civic__atlas_dot_v1_dot_civic__atlas__pb2.CivicResearchRequest.SerializeToString,
+                response_deserializer=civic__atlas_dot_v1_dot_civic__atlas__pb2.CivicResearchResponse.FromString,
+                _registered_method=True)
+        self.PersistArtifact = channel.unary_unary(
+                '/civic_atlas.v1.CivicAtlasService/PersistArtifact',
+                request_serializer=civic__atlas_dot_v1_dot_civic__atlas__pb2.PersistArtifactRequest.SerializeToString,
+                response_deserializer=civic__atlas_dot_v1_dot_civic__atlas__pb2.PersistArtifactResponse.FromString,
+                _registered_method=True)
 
 
 class CivicAtlasServiceServicer(object):
@@ -105,6 +115,27 @@ class CivicAtlasServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def CivicResearch(self, request, context):
+        """Civic research entrypoint. Fans out to Theseus's search
+        orchestrator via the theseus-client crate's gRPC connection
+        (theseus_search.v1.SearchService.Search with mode=CIVIC_ATLAS).
+        NOT the harness path; NOT RustyRedCore-THG; NOT compose engine.
+        Future iterations may decorate the response with civic atlas data
+        (per-place geometry hydration from PostGIS, civic-atlas RustyRed
+        hot-graph augmentation) before returning to the sidecar.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def PersistArtifact(self, request, context):
+        """Service-tier ingest boundary for artifact persistence. Intended
+        for batch jobs and bridge processes, never for browser clients.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_CivicAtlasServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -137,6 +168,16 @@ def add_CivicAtlasServiceServicer_to_server(servicer, server):
                     servicer.Health,
                     request_deserializer=civic__atlas_dot_v1_dot_civic__atlas__pb2.HealthRequest.FromString,
                     response_serializer=civic__atlas_dot_v1_dot_civic__atlas__pb2.HealthResponse.SerializeToString,
+            ),
+            'CivicResearch': grpc.unary_unary_rpc_method_handler(
+                    servicer.CivicResearch,
+                    request_deserializer=civic__atlas_dot_v1_dot_civic__atlas__pb2.CivicResearchRequest.FromString,
+                    response_serializer=civic__atlas_dot_v1_dot_civic__atlas__pb2.CivicResearchResponse.SerializeToString,
+            ),
+            'PersistArtifact': grpc.unary_unary_rpc_method_handler(
+                    servicer.PersistArtifact,
+                    request_deserializer=civic__atlas_dot_v1_dot_civic__atlas__pb2.PersistArtifactRequest.FromString,
+                    response_serializer=civic__atlas_dot_v1_dot_civic__atlas__pb2.PersistArtifactResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -301,6 +342,60 @@ class CivicAtlasService(object):
             '/civic_atlas.v1.CivicAtlasService/Health',
             civic__atlas_dot_v1_dot_civic__atlas__pb2.HealthRequest.SerializeToString,
             civic__atlas_dot_v1_dot_civic__atlas__pb2.HealthResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CivicResearch(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/civic_atlas.v1.CivicAtlasService/CivicResearch',
+            civic__atlas_dot_v1_dot_civic__atlas__pb2.CivicResearchRequest.SerializeToString,
+            civic__atlas_dot_v1_dot_civic__atlas__pb2.CivicResearchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PersistArtifact(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/civic_atlas.v1.CivicAtlasService/PersistArtifact',
+            civic__atlas_dot_v1_dot_civic__atlas__pb2.PersistArtifactRequest.SerializeToString,
+            civic__atlas_dot_v1_dot_civic__atlas__pb2.PersistArtifactResponse.FromString,
             options,
             channel_credentials,
             insecure,

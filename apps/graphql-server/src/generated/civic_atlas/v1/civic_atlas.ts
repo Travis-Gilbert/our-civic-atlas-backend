@@ -96,6 +96,113 @@ export interface HealthResponse {
   tenantId: string;
 }
 
+/**
+ * Civic research. Axum's outward face for the Node sidecar's
+ * `Mutation.civicResearch` resolver.
+ *
+ * Wire flow:
+ *   Node sidecar GraphQL resolver
+ *     -> CivicAtlasService.CivicResearch (this RPC, native gRPC)
+ *     -> theseus-client crate
+ *     -> theseus_search.v1.SearchService.Search
+ *        (Index-API bridge_server.py hosts the SearchService impl)
+ *     -> apps/orchestrate/runtime/search_kernel.py:SearchKernel
+ *     -> apps/notebook/search/native/search.py:native_search
+ *        (which composes apps/notebook/search/kernel/ + apps/notebook/web/)
+ *
+ * The Search RPC is the canonical theseus_search.v1 contract (vendored
+ * from theorem-protos). Mode set to SEARCH_MODE_CIVIC_ATLAS so the
+ * orchestrator dispatches gap-driven + web retrieval + source-pair as
+ * the civic-atlas default behavior.
+ *
+ * NOT the Theseus harness; NOT RustyRedCore-THG; NOT the compose
+ * engine. The search orchestrator is its own product surface, sibling
+ * to the harness and to RustyRed.
+ *
+ * Why Axum owns this RPC instead of the sidecar calling Theseus
+ * directly: TenantContext enforcement, future caching against PostGIS
+ * or civic-atlas RustyRed (the project's own RustyRed deployment, not
+ * Theseus's THG), and the project rule "Service-Tier Auth Stays
+ * Server-Side". Theseus credentials live in this process, never in
+ * the sidecar or the browser.
+ */
+export interface CivicResearchRequest {
+  tenantContext: TenantContext | undefined;
+  query: string;
+  /**
+   * Optional search orchestrator knobs (top_k, min_confidence,
+   * source_pair, max_rounds, etc.). Forwarded verbatim as JSON
+   * because the orchestrator vocabulary can evolve faster than this
+   * proto can re-version. Civic-atlas defaults apply when empty.
+   */
+  budgetJson: string;
+  /**
+   * Optional scope hints (era, bbox, place_ids, source_ids,
+   * min_confidence, providers). Same JSON-serialization rationale.
+   */
+  scopeJson: string;
+  /** Optional session id for cross-call caching and follow-up. */
+  sessionId: string;
+  /** Optional folio id when the call is part of a curated workspace. */
+  folioId: string;
+}
+
+export interface CivicResearchResponse {
+  /**
+   * Search orchestrator trace identifier; useful for replay / compare
+   * and for the future Provenance() lookup. Field name kept as
+   * `run_id` so the GraphQL contract (`runId`) stays stable across
+   * implementation changes.
+   */
+  runId: string;
+  /**
+   * Orchestrator mode that ran (e.g. "civic_atlas", "deep", "ask").
+   * Field name kept as `skill` so the GraphQL contract stays stable.
+   */
+  skill: string;
+  /**
+   * Evidence the orchestrator returned, serialized as JSON matching
+   * the public `SearchResults` GraphQL type so the Node sidecar can
+   * pass it through to the browser unchanged.
+   */
+  resultsJson: string;
+}
+
+/**
+ * Service-tier artifact persistence. This is not a browser-facing
+ * capture route; it is the backend write contract used by ingest jobs
+ * to land source-backed artifacts in the tenant-scoped PostGIS truth
+ * tables. The payload_json string is stored verbatim in artifacts.payload_jsonb.
+ */
+export interface PersistArtifactRequest {
+  tenantContext: TenantContext | undefined;
+  artifactKey: string;
+  sourceType: string;
+  title: string;
+  uri: string;
+  citation: string;
+  capturedAtMs?: number | undefined;
+  payloadJson: string;
+  /**
+   * UUID or parcel_key. When present, the server resolves it against
+   * the tenant's parcels table and attaches the resulting parcel_id on
+   * the artifact anchor so direct parcel reconstruction can see it.
+   */
+  parcelRef: string;
+  buildingId: string;
+  buildingPartId: string;
+  anchorKind: string;
+  anchorGeometryWkt: string;
+  anchorTimeStartMs?: number | undefined;
+  anchorTimeEndMs?: number | undefined;
+  anchorPayloadJson: string;
+}
+
+export interface PersistArtifactResponse {
+  artifactId: string;
+  status: string;
+}
+
 function createBaseTenantContext(): TenantContext {
   return { tenantId: "", atlasNodeId: "", metadata: {} };
 }
@@ -1592,6 +1699,719 @@ export const HealthResponse: MessageFns<HealthResponse> = {
   },
 };
 
+function createBaseCivicResearchRequest(): CivicResearchRequest {
+  return { tenantContext: undefined, query: "", budgetJson: "", scopeJson: "", sessionId: "", folioId: "" };
+}
+
+export const CivicResearchRequest: MessageFns<CivicResearchRequest> = {
+  encode(message: CivicResearchRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.tenantContext !== undefined) {
+      TenantContext.encode(message.tenantContext, writer.uint32(10).fork()).join();
+    }
+    if (message.query !== "") {
+      writer.uint32(18).string(message.query);
+    }
+    if (message.budgetJson !== "") {
+      writer.uint32(26).string(message.budgetJson);
+    }
+    if (message.scopeJson !== "") {
+      writer.uint32(34).string(message.scopeJson);
+    }
+    if (message.sessionId !== "") {
+      writer.uint32(42).string(message.sessionId);
+    }
+    if (message.folioId !== "") {
+      writer.uint32(50).string(message.folioId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CivicResearchRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCivicResearchRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.tenantContext = TenantContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.query = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.budgetJson = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.scopeJson = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.sessionId = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.folioId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CivicResearchRequest {
+    return {
+      tenantContext: isSet(object.tenantContext)
+        ? TenantContext.fromJSON(object.tenantContext)
+        : isSet(object.tenant_context)
+        ? TenantContext.fromJSON(object.tenant_context)
+        : undefined,
+      query: isSet(object.query) ? globalThis.String(object.query) : "",
+      budgetJson: isSet(object.budgetJson)
+        ? globalThis.String(object.budgetJson)
+        : isSet(object.budget_json)
+        ? globalThis.String(object.budget_json)
+        : "",
+      scopeJson: isSet(object.scopeJson)
+        ? globalThis.String(object.scopeJson)
+        : isSet(object.scope_json)
+        ? globalThis.String(object.scope_json)
+        : "",
+      sessionId: isSet(object.sessionId)
+        ? globalThis.String(object.sessionId)
+        : isSet(object.session_id)
+        ? globalThis.String(object.session_id)
+        : "",
+      folioId: isSet(object.folioId)
+        ? globalThis.String(object.folioId)
+        : isSet(object.folio_id)
+        ? globalThis.String(object.folio_id)
+        : "",
+    };
+  },
+
+  toJSON(message: CivicResearchRequest): unknown {
+    const obj: any = {};
+    if (message.tenantContext !== undefined) {
+      obj.tenantContext = TenantContext.toJSON(message.tenantContext);
+    }
+    if (message.query !== "") {
+      obj.query = message.query;
+    }
+    if (message.budgetJson !== "") {
+      obj.budgetJson = message.budgetJson;
+    }
+    if (message.scopeJson !== "") {
+      obj.scopeJson = message.scopeJson;
+    }
+    if (message.sessionId !== "") {
+      obj.sessionId = message.sessionId;
+    }
+    if (message.folioId !== "") {
+      obj.folioId = message.folioId;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<CivicResearchRequest>): CivicResearchRequest {
+    return CivicResearchRequest.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<CivicResearchRequest>): CivicResearchRequest {
+    const message = createBaseCivicResearchRequest();
+    message.tenantContext = (object.tenantContext !== undefined && object.tenantContext !== null)
+      ? TenantContext.fromPartial(object.tenantContext)
+      : undefined;
+    message.query = object.query ?? "";
+    message.budgetJson = object.budgetJson ?? "";
+    message.scopeJson = object.scopeJson ?? "";
+    message.sessionId = object.sessionId ?? "";
+    message.folioId = object.folioId ?? "";
+    return message;
+  },
+};
+
+function createBaseCivicResearchResponse(): CivicResearchResponse {
+  return { runId: "", skill: "", resultsJson: "" };
+}
+
+export const CivicResearchResponse: MessageFns<CivicResearchResponse> = {
+  encode(message: CivicResearchResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.runId !== "") {
+      writer.uint32(10).string(message.runId);
+    }
+    if (message.skill !== "") {
+      writer.uint32(18).string(message.skill);
+    }
+    if (message.resultsJson !== "") {
+      writer.uint32(26).string(message.resultsJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CivicResearchResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCivicResearchResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.runId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.skill = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.resultsJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CivicResearchResponse {
+    return {
+      runId: isSet(object.runId)
+        ? globalThis.String(object.runId)
+        : isSet(object.run_id)
+        ? globalThis.String(object.run_id)
+        : "",
+      skill: isSet(object.skill) ? globalThis.String(object.skill) : "",
+      resultsJson: isSet(object.resultsJson)
+        ? globalThis.String(object.resultsJson)
+        : isSet(object.results_json)
+        ? globalThis.String(object.results_json)
+        : "",
+    };
+  },
+
+  toJSON(message: CivicResearchResponse): unknown {
+    const obj: any = {};
+    if (message.runId !== "") {
+      obj.runId = message.runId;
+    }
+    if (message.skill !== "") {
+      obj.skill = message.skill;
+    }
+    if (message.resultsJson !== "") {
+      obj.resultsJson = message.resultsJson;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<CivicResearchResponse>): CivicResearchResponse {
+    return CivicResearchResponse.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<CivicResearchResponse>): CivicResearchResponse {
+    const message = createBaseCivicResearchResponse();
+    message.runId = object.runId ?? "";
+    message.skill = object.skill ?? "";
+    message.resultsJson = object.resultsJson ?? "";
+    return message;
+  },
+};
+
+function createBasePersistArtifactRequest(): PersistArtifactRequest {
+  return {
+    tenantContext: undefined,
+    artifactKey: "",
+    sourceType: "",
+    title: "",
+    uri: "",
+    citation: "",
+    capturedAtMs: undefined,
+    payloadJson: "",
+    parcelRef: "",
+    buildingId: "",
+    buildingPartId: "",
+    anchorKind: "",
+    anchorGeometryWkt: "",
+    anchorTimeStartMs: undefined,
+    anchorTimeEndMs: undefined,
+    anchorPayloadJson: "",
+  };
+}
+
+export const PersistArtifactRequest: MessageFns<PersistArtifactRequest> = {
+  encode(message: PersistArtifactRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.tenantContext !== undefined) {
+      TenantContext.encode(message.tenantContext, writer.uint32(10).fork()).join();
+    }
+    if (message.artifactKey !== "") {
+      writer.uint32(18).string(message.artifactKey);
+    }
+    if (message.sourceType !== "") {
+      writer.uint32(26).string(message.sourceType);
+    }
+    if (message.title !== "") {
+      writer.uint32(34).string(message.title);
+    }
+    if (message.uri !== "") {
+      writer.uint32(42).string(message.uri);
+    }
+    if (message.citation !== "") {
+      writer.uint32(50).string(message.citation);
+    }
+    if (message.capturedAtMs !== undefined) {
+      writer.uint32(56).int64(message.capturedAtMs);
+    }
+    if (message.payloadJson !== "") {
+      writer.uint32(66).string(message.payloadJson);
+    }
+    if (message.parcelRef !== "") {
+      writer.uint32(74).string(message.parcelRef);
+    }
+    if (message.buildingId !== "") {
+      writer.uint32(82).string(message.buildingId);
+    }
+    if (message.buildingPartId !== "") {
+      writer.uint32(90).string(message.buildingPartId);
+    }
+    if (message.anchorKind !== "") {
+      writer.uint32(98).string(message.anchorKind);
+    }
+    if (message.anchorGeometryWkt !== "") {
+      writer.uint32(106).string(message.anchorGeometryWkt);
+    }
+    if (message.anchorTimeStartMs !== undefined) {
+      writer.uint32(112).int64(message.anchorTimeStartMs);
+    }
+    if (message.anchorTimeEndMs !== undefined) {
+      writer.uint32(120).int64(message.anchorTimeEndMs);
+    }
+    if (message.anchorPayloadJson !== "") {
+      writer.uint32(130).string(message.anchorPayloadJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PersistArtifactRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePersistArtifactRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.tenantContext = TenantContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.artifactKey = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.sourceType = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.title = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.uri = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.citation = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.capturedAtMs = longToNumber(reader.int64());
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.payloadJson = reader.string();
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.parcelRef = reader.string();
+          continue;
+        }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.buildingId = reader.string();
+          continue;
+        }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.buildingPartId = reader.string();
+          continue;
+        }
+        case 12: {
+          if (tag !== 98) {
+            break;
+          }
+
+          message.anchorKind = reader.string();
+          continue;
+        }
+        case 13: {
+          if (tag !== 106) {
+            break;
+          }
+
+          message.anchorGeometryWkt = reader.string();
+          continue;
+        }
+        case 14: {
+          if (tag !== 112) {
+            break;
+          }
+
+          message.anchorTimeStartMs = longToNumber(reader.int64());
+          continue;
+        }
+        case 15: {
+          if (tag !== 120) {
+            break;
+          }
+
+          message.anchorTimeEndMs = longToNumber(reader.int64());
+          continue;
+        }
+        case 16: {
+          if (tag !== 130) {
+            break;
+          }
+
+          message.anchorPayloadJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): PersistArtifactRequest {
+    return {
+      tenantContext: isSet(object.tenantContext)
+        ? TenantContext.fromJSON(object.tenantContext)
+        : isSet(object.tenant_context)
+        ? TenantContext.fromJSON(object.tenant_context)
+        : undefined,
+      artifactKey: isSet(object.artifactKey)
+        ? globalThis.String(object.artifactKey)
+        : isSet(object.artifact_key)
+        ? globalThis.String(object.artifact_key)
+        : "",
+      sourceType: isSet(object.sourceType)
+        ? globalThis.String(object.sourceType)
+        : isSet(object.source_type)
+        ? globalThis.String(object.source_type)
+        : "",
+      title: isSet(object.title) ? globalThis.String(object.title) : "",
+      uri: isSet(object.uri) ? globalThis.String(object.uri) : "",
+      citation: isSet(object.citation) ? globalThis.String(object.citation) : "",
+      capturedAtMs: isSet(object.capturedAtMs)
+        ? globalThis.Number(object.capturedAtMs)
+        : isSet(object.captured_at_ms)
+        ? globalThis.Number(object.captured_at_ms)
+        : undefined,
+      payloadJson: isSet(object.payloadJson)
+        ? globalThis.String(object.payloadJson)
+        : isSet(object.payload_json)
+        ? globalThis.String(object.payload_json)
+        : "",
+      parcelRef: isSet(object.parcelRef)
+        ? globalThis.String(object.parcelRef)
+        : isSet(object.parcel_ref)
+        ? globalThis.String(object.parcel_ref)
+        : "",
+      buildingId: isSet(object.buildingId)
+        ? globalThis.String(object.buildingId)
+        : isSet(object.building_id)
+        ? globalThis.String(object.building_id)
+        : "",
+      buildingPartId: isSet(object.buildingPartId)
+        ? globalThis.String(object.buildingPartId)
+        : isSet(object.building_part_id)
+        ? globalThis.String(object.building_part_id)
+        : "",
+      anchorKind: isSet(object.anchorKind)
+        ? globalThis.String(object.anchorKind)
+        : isSet(object.anchor_kind)
+        ? globalThis.String(object.anchor_kind)
+        : "",
+      anchorGeometryWkt: isSet(object.anchorGeometryWkt)
+        ? globalThis.String(object.anchorGeometryWkt)
+        : isSet(object.anchor_geometry_wkt)
+        ? globalThis.String(object.anchor_geometry_wkt)
+        : "",
+      anchorTimeStartMs: isSet(object.anchorTimeStartMs)
+        ? globalThis.Number(object.anchorTimeStartMs)
+        : isSet(object.anchor_time_start_ms)
+        ? globalThis.Number(object.anchor_time_start_ms)
+        : undefined,
+      anchorTimeEndMs: isSet(object.anchorTimeEndMs)
+        ? globalThis.Number(object.anchorTimeEndMs)
+        : isSet(object.anchor_time_end_ms)
+        ? globalThis.Number(object.anchor_time_end_ms)
+        : undefined,
+      anchorPayloadJson: isSet(object.anchorPayloadJson)
+        ? globalThis.String(object.anchorPayloadJson)
+        : isSet(object.anchor_payload_json)
+        ? globalThis.String(object.anchor_payload_json)
+        : "",
+    };
+  },
+
+  toJSON(message: PersistArtifactRequest): unknown {
+    const obj: any = {};
+    if (message.tenantContext !== undefined) {
+      obj.tenantContext = TenantContext.toJSON(message.tenantContext);
+    }
+    if (message.artifactKey !== "") {
+      obj.artifactKey = message.artifactKey;
+    }
+    if (message.sourceType !== "") {
+      obj.sourceType = message.sourceType;
+    }
+    if (message.title !== "") {
+      obj.title = message.title;
+    }
+    if (message.uri !== "") {
+      obj.uri = message.uri;
+    }
+    if (message.citation !== "") {
+      obj.citation = message.citation;
+    }
+    if (message.capturedAtMs !== undefined) {
+      obj.capturedAtMs = Math.round(message.capturedAtMs);
+    }
+    if (message.payloadJson !== "") {
+      obj.payloadJson = message.payloadJson;
+    }
+    if (message.parcelRef !== "") {
+      obj.parcelRef = message.parcelRef;
+    }
+    if (message.buildingId !== "") {
+      obj.buildingId = message.buildingId;
+    }
+    if (message.buildingPartId !== "") {
+      obj.buildingPartId = message.buildingPartId;
+    }
+    if (message.anchorKind !== "") {
+      obj.anchorKind = message.anchorKind;
+    }
+    if (message.anchorGeometryWkt !== "") {
+      obj.anchorGeometryWkt = message.anchorGeometryWkt;
+    }
+    if (message.anchorTimeStartMs !== undefined) {
+      obj.anchorTimeStartMs = Math.round(message.anchorTimeStartMs);
+    }
+    if (message.anchorTimeEndMs !== undefined) {
+      obj.anchorTimeEndMs = Math.round(message.anchorTimeEndMs);
+    }
+    if (message.anchorPayloadJson !== "") {
+      obj.anchorPayloadJson = message.anchorPayloadJson;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<PersistArtifactRequest>): PersistArtifactRequest {
+    return PersistArtifactRequest.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<PersistArtifactRequest>): PersistArtifactRequest {
+    const message = createBasePersistArtifactRequest();
+    message.tenantContext = (object.tenantContext !== undefined && object.tenantContext !== null)
+      ? TenantContext.fromPartial(object.tenantContext)
+      : undefined;
+    message.artifactKey = object.artifactKey ?? "";
+    message.sourceType = object.sourceType ?? "";
+    message.title = object.title ?? "";
+    message.uri = object.uri ?? "";
+    message.citation = object.citation ?? "";
+    message.capturedAtMs = object.capturedAtMs ?? undefined;
+    message.payloadJson = object.payloadJson ?? "";
+    message.parcelRef = object.parcelRef ?? "";
+    message.buildingId = object.buildingId ?? "";
+    message.buildingPartId = object.buildingPartId ?? "";
+    message.anchorKind = object.anchorKind ?? "";
+    message.anchorGeometryWkt = object.anchorGeometryWkt ?? "";
+    message.anchorTimeStartMs = object.anchorTimeStartMs ?? undefined;
+    message.anchorTimeEndMs = object.anchorTimeEndMs ?? undefined;
+    message.anchorPayloadJson = object.anchorPayloadJson ?? "";
+    return message;
+  },
+};
+
+function createBasePersistArtifactResponse(): PersistArtifactResponse {
+  return { artifactId: "", status: "" };
+}
+
+export const PersistArtifactResponse: MessageFns<PersistArtifactResponse> = {
+  encode(message: PersistArtifactResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.artifactId !== "") {
+      writer.uint32(10).string(message.artifactId);
+    }
+    if (message.status !== "") {
+      writer.uint32(18).string(message.status);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PersistArtifactResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePersistArtifactResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.artifactId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.status = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): PersistArtifactResponse {
+    return {
+      artifactId: isSet(object.artifactId)
+        ? globalThis.String(object.artifactId)
+        : isSet(object.artifact_id)
+        ? globalThis.String(object.artifact_id)
+        : "",
+      status: isSet(object.status) ? globalThis.String(object.status) : "",
+    };
+  },
+
+  toJSON(message: PersistArtifactResponse): unknown {
+    const obj: any = {};
+    if (message.artifactId !== "") {
+      obj.artifactId = message.artifactId;
+    }
+    if (message.status !== "") {
+      obj.status = message.status;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<PersistArtifactResponse>): PersistArtifactResponse {
+    return PersistArtifactResponse.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<PersistArtifactResponse>): PersistArtifactResponse {
+    const message = createBasePersistArtifactResponse();
+    message.artifactId = object.artifactId ?? "";
+    message.status = object.status ?? "";
+    return message;
+  },
+};
+
 export type CivicAtlasServiceDefinition = typeof CivicAtlasServiceDefinition;
 export const CivicAtlasServiceDefinition = {
   name: "CivicAtlasService",
@@ -1642,6 +2462,35 @@ export const CivicAtlasServiceDefinition = {
       requestType: HealthRequest as typeof HealthRequest,
       requestStream: false,
       responseType: HealthResponse as typeof HealthResponse,
+      responseStream: false,
+      options: {},
+    },
+    /**
+     * Civic research entrypoint. Fans out to Theseus's search
+     * orchestrator via the theseus-client crate's gRPC connection
+     * (theseus_search.v1.SearchService.Search with mode=CIVIC_ATLAS).
+     * NOT the harness path; NOT RustyRedCore-THG; NOT compose engine.
+     * Future iterations may decorate the response with civic atlas data
+     * (per-place geometry hydration from PostGIS, civic-atlas RustyRed
+     * hot-graph augmentation) before returning to the sidecar.
+     */
+    civicResearch: {
+      name: "CivicResearch",
+      requestType: CivicResearchRequest as typeof CivicResearchRequest,
+      requestStream: false,
+      responseType: CivicResearchResponse as typeof CivicResearchResponse,
+      responseStream: false,
+      options: {},
+    },
+    /**
+     * Service-tier ingest boundary for artifact persistence. Intended
+     * for batch jobs and bridge processes, never for browser clients.
+     */
+    persistArtifact: {
+      name: "PersistArtifact",
+      requestType: PersistArtifactRequest as typeof PersistArtifactRequest,
+      requestStream: false,
+      responseType: PersistArtifactResponse as typeof PersistArtifactResponse,
       responseStream: false,
       options: {},
     },

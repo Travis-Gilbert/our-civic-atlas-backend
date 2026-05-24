@@ -54,6 +54,8 @@ type KpiMetricRecord = {
   readonly sourceSummary: string;
 };
 
+type JsonRecord = Record<string, unknown>;
+
 const SCENARIOS: readonly ScenarioRecord[] = [
   {
     scenarioId: "current",
@@ -207,32 +209,182 @@ export function buildContext(client: CivicAtlasGrpcClient): GraphqlContext {
  * empty arrays rather than crashing GraphQL field resolution.
  */
 function parseSearchResults(resultsJson: string, query: string) {
-  let parsed: Record<string, unknown> = {};
+  let parsed: JsonRecord = {};
   try {
     const decoded = JSON.parse(resultsJson || "{}") as unknown;
     if (decoded && typeof decoded === "object") {
-      parsed = decoded as Record<string, unknown>;
+      parsed = decoded as JsonRecord;
     }
   } catch {
     parsed = {};
   }
+  const record = (value: unknown): JsonRecord =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as JsonRecord)
+      : {};
   const arr = (key: string): readonly unknown[] => {
     const value = parsed[key];
     return Array.isArray(value) ? (value as readonly unknown[]) : [];
   };
+  const text = (value: unknown, fallback = ""): string =>
+    typeof value === "string" && value.trim() ? value : fallback;
+  const nullableText = (value: unknown): string | null =>
+    typeof value === "string" && value.trim() ? value : null;
+  const number = (value: unknown, fallback = 0): number =>
+    typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  const coordinatePair = (value: unknown): [number, number] | null => {
+    if (
+      Array.isArray(value) &&
+      value.length >= 2 &&
+      typeof value[0] === "number" &&
+      typeof value[1] === "number"
+    ) {
+      return [value[0], value[1]];
+    }
+    return null;
+  };
+  const placeRef = (value: unknown) => {
+    const item = record(value);
+    const id = text(item.id);
+    const name = text(item.name);
+    return id && name ? { id, name } : null;
+  };
+  const typedPlaces = arr("places").map((value, index) => {
+    const item = record(value);
+    return {
+      id: text(item.id, `place:${index}`),
+      name: text(item.name ?? item.label, "Unknown place"),
+      placeType: text(item.placeType ?? item.kind, "place"),
+      centroid: coordinatePair(item.centroid),
+      confidence: number(item.confidence, 0),
+      temporalStatus: text(item.temporalStatus, "unknown"),
+    };
+  });
+  const typedSignals = arr("signals").map((value, index) => {
+    const item = record(value);
+    return {
+      id: text(item.id, `signal:${index}`),
+      signalKind: text(item.signalKind ?? item.kind, "civic_research"),
+      title: text(item.title ?? item.label, "Research signal"),
+      summary: text(item.summary ?? item.snippet),
+      publishedAt: nullableText(item.publishedAt),
+      relativeTimeLabel: nullableText(item.relativeTimeLabel),
+      confidence: number(item.confidence, 0),
+      place: placeRef(item.place),
+    };
+  });
+  const typedEvents = arr("events").map((value, index) => {
+    const item = record(value);
+    return {
+      id: text(item.id, `event:${index}`),
+      title: text(item.title ?? item.label, "Research event"),
+      summary: text(item.summary ?? item.snippet),
+      occurredAt: nullableText(item.occurredAt),
+      confidence: number(item.confidence, 0),
+      place: placeRef(item.place),
+    };
+  });
+  const typedReconstructions = arr("historicalReconstructions").map(
+    (value, index) => {
+      const item = record(value);
+      return {
+        id: text(item.id, `reconstruction:${index}`),
+        name: text(item.name ?? item.label, "Research reconstruction"),
+        description: text(item.description ?? item.snippet),
+        position: coordinatePair(item.position) ?? [0, 0],
+        confidence: number(item.confidence, 0),
+        timeStart: nullableText(item.timeStart),
+        timeEnd: nullableText(item.timeEnd),
+      };
+    },
+  );
+  const typedSources = arr("sources").map((value, index) => {
+    const item = record(value);
+    return {
+      id: text(item.id, `source:${index}`),
+      name: text(item.name ?? item.url ?? item.source, "Research source"),
+      sourceType: text(item.sourceType ?? item.source, "research"),
+      trustTier: text(item.trustTier, "reviewable"),
+    };
+  });
+  const searchEvidence = [...arr("priorKnowledge"), ...arr("newEvidence")].map(
+    (value, index) => {
+      const item = record(value);
+      return {
+        id: text(item.resultId ?? item.id, `research:${index}`),
+        signalKind: text(item.kind, "civic_research"),
+        title: text(item.label ?? item.title, "Research result"),
+        summary: text(item.snippet ?? item.summary),
+        publishedAt: null,
+        relativeTimeLabel: null,
+        confidence: number(item.confidence, number(item.relevanceScore, 0)),
+        place: null,
+        source: text(item.source),
+        url: text(item.url),
+      };
+    },
+  );
+  const gapSignals = arr("gapClosures").map((value, index) => {
+    const item = record(value);
+    const gapId = text(item.gapId ?? item.id, `gap:${index}`);
+    const description = text(item.description ?? item.summary);
+    const closed = Boolean(item.closed);
+    const isConfigMissing =
+      gapId.includes("rustyred_unconfigured") ||
+      description.toLowerCase().includes("rustyred_unconfigured");
+    const title = isConfigMissing
+      ? "Research sources are not connected yet"
+      : closed
+        ? "Research gap closed"
+        : "Research needs more source data";
+    return {
+      id: `gap:${gapId}`,
+      signalKind: closed ? "gap_closure" : "research_status",
+      title,
+      summary:
+        description ||
+        (closed
+          ? "Civic research closed a source gap."
+          : "Civic research could not expand this query yet."),
+      publishedAt: null,
+      relativeTimeLabel: null,
+      confidence: 0,
+      place: null,
+    };
+  });
+  const evidenceSources = searchEvidence
+    .filter((item) => item.url || item.source)
+    .map((item, index) => ({
+      id: `research-source:${item.id || index}`,
+      name: item.url || item.source || "Research source",
+      sourceType: item.source || "research",
+      trustTier: "reviewable",
+    }));
+  const signals = [
+    ...typedSignals,
+    ...gapSignals,
+    ...searchEvidence.map(({ source: _source, url: _url, ...signal }) => signal),
+  ];
   return {
     query: (parsed.query as string | undefined) ?? query,
-    totalResultCount: Number(parsed.totalResultCount ?? 0),
+    totalResultCount: Number(
+      parsed.totalResultCount ??
+        parsed.totalReturned ??
+        typedPlaces.length +
+          signals.length +
+          typedEvents.length +
+          typedReconstructions.length,
+    ),
     reranked: Boolean(parsed.reranked),
     acceptedConfidenceFloor: Number(parsed.acceptedConfidenceFloor ?? 0),
     inferredTimeRange:
-      (parsed.inferredTimeRange as Record<string, unknown> | null | undefined) ??
+      (parsed.inferredTimeRange as JsonRecord | null | undefined) ??
       null,
-    places: arr("places"),
-    signals: arr("signals"),
-    events: arr("events"),
-    historicalReconstructions: arr("historicalReconstructions"),
-    sources: arr("sources"),
+    places: typedPlaces,
+    signals,
+    events: typedEvents,
+    historicalReconstructions: typedReconstructions,
+    sources: [...typedSources, ...evidenceSources],
   };
 }
 
@@ -271,11 +423,61 @@ export const schema = createSchema<GraphqlContext>({
       label: String
     }
 
+    type SearchPlaceRef {
+      id: ID!
+      name: String!
+    }
+
+    type Place {
+      id: ID!
+      name: String!
+      placeType: String!
+      centroid: LatLng
+      confidence: Float!
+      temporalStatus: String!
+    }
+
+    type Signal {
+      id: ID!
+      signalKind: String!
+      title: String!
+      summary: String!
+      publishedAt: DateTime
+      relativeTimeLabel: String
+      confidence: Float!
+      place: SearchPlaceRef
+    }
+
+    type SpatialEvent {
+      id: ID!
+      title: String!
+      summary: String!
+      occurredAt: DateTime
+      confidence: Float!
+      place: SearchPlaceRef
+    }
+
+    type HistoricalReconstruction {
+      id: ID!
+      name: String!
+      description: String!
+      position: LatLng!
+      confidence: Float!
+      timeStart: DateTime
+      timeEnd: DateTime
+    }
+
+    type Source {
+      id: ID!
+      name: String!
+      sourceType: String!
+      trustTier: String!
+    }
+
     """
-    Shape returned by searchAtlas and civicResearch alike. Lets the
-    frontend inject results into existing atlas state with a single
-    merge step. Arrays are empty (never null) when the algorithm
-    surfaces nothing.
+    Shape returned by searchAtlas and civicResearch alike. The sidecar
+    exposes typed buckets even when Axum receives lower-level
+    theseus_search priorKnowledge/newEvidence records.
     """
     type SearchResults {
       query: String!
@@ -283,11 +485,11 @@ export const schema = createSchema<GraphqlContext>({
       reranked: Boolean!
       acceptedConfidenceFloor: Float!
       inferredTimeRange: TimeRange
-      places: [JSON!]!
-      signals: [JSON!]!
-      events: [JSON!]!
-      historicalReconstructions: [JSON!]!
-      sources: [JSON!]!
+      places: [Place!]!
+      signals: [Signal!]!
+      events: [SpatialEvent!]!
+      historicalReconstructions: [HistoricalReconstruction!]!
+      sources: [Source!]!
     }
 
     """

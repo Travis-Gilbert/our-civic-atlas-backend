@@ -14,8 +14,9 @@ use civic_atlas_types::civic_atlas::v1::{
     GetDossierResponse, GetNearbyArtifactsRequest, GetNearbyArtifactsResponse, GetNodeRequest,
     GetNodeResponse, GetParcelHistoryRequest, GetParcelHistoryResponse, GetPlaceRequest,
     GetPlaceResponse, GetViewportAtTimeRequest, GetViewportAtTimeResponse, HealthRequest,
-    HealthResponse, ListPlacesRequest, ListPlacesResponse, ResolveTenantRequest,
-    ResolveTenantResponse, TenantContext, TimeSlice, ViewportBounds,
+    HealthResponse, ListPlacesRequest, ListPlacesResponse, PersistArtifactRequest,
+    PersistArtifactResponse, ResolveTenantRequest, ResolveTenantResponse, TenantContext,
+    TimeSlice, ViewportBounds,
 };
 use civic_atlas_types::theseus_search::v1::{
     SearchMode as TheseusSearchMode, SearchRequest as TheseusSearchRequest,
@@ -23,7 +24,7 @@ use civic_atlas_types::theseus_search::v1::{
 use theseus_client::TheseusClient;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+use sqlx::{postgres::PgPoolOptions, types::Json as SqlJson, PgPool, Row};
 use tenant_resolver::require_tenant_context;
 use tonic::{Request, Response, Status};
 use tracing::warn;
@@ -318,12 +319,36 @@ impl CivicAtlasService for CivicAtlasGrpcService {
         // resolvers for prior_knowledge / new_evidence / gap_closures,
         // this serialization moves into a typed mapping; for now it
         // preserves the wire contract Civic Atlas already consumes.
+        let run_id = if search_response.provenance_root_id.trim().is_empty() {
+            format!("civic-atlas:{}", Uuid::new_v4())
+        } else {
+            search_response.provenance_root_id.clone()
+        };
+        let gap_closures = search_response
+            .gap_closures
+            .iter()
+            .map(|gap| {
+                json!({
+                    "gapId": gap.gap_id,
+                    "description": gap.description,
+                    "closed": gap.closed,
+                    "evidenceCount": gap.evidence_count,
+                })
+            })
+            .collect::<Vec<_>>();
         let results_json = serde_json::to_string(&json!({
             "query": search_response.query,
+            "runId": &run_id,
             "totalReturned": search_response.total_returned,
             "totalAdmitted": search_response.total_admitted,
             "roundsExecuted": search_response.rounds_executed,
             "latencyMs": search_response.latency_ms,
+            "metadata": {
+                "mode": "civic_atlas",
+                "substrate": "rustyred",
+                "searchService": "theseus_search.v1.SearchService",
+                "degraded": !gap_closures.is_empty(),
+            },
             "priorKnowledge": search_response
                 .prior_knowledge
                 .iter()
@@ -334,26 +359,134 @@ impl CivicAtlasService for CivicAtlasGrpcService {
                 .iter()
                 .map(search_result_to_json)
                 .collect::<Vec<_>>(),
-            "gapClosures": search_response
-                .gap_closures
-                .iter()
-                .map(|gap| {
-                    json!({
-                        "gapId": gap.gap_id,
-                        "description": gap.description,
-                        "closed": gap.closed,
-                        "evidenceCount": gap.evidence_count,
-                    })
-                })
-                .collect::<Vec<_>>(),
+            "gapClosures": gap_closures,
             "provenanceRootId": search_response.provenance_root_id,
         }))
         .unwrap_or_else(|_| String::from("{}"));
 
         Ok(Response::new(CivicResearchResponse {
-            run_id: search_response.provenance_root_id,
+            run_id,
             skill: String::from("civic_atlas"),
             results_json,
+        }))
+    }
+
+    async fn persist_artifact(
+        &self,
+        request: Request<PersistArtifactRequest>,
+    ) -> Result<Response<PersistArtifactResponse>, Status> {
+        let request = request.into_inner();
+        let tenant = require_tenant_context(request.tenant_context.as_ref())
+            .map_err(|err| Status::unauthenticated(err.to_string()))?;
+        if request.artifact_key.trim().is_empty() {
+            return Err(Status::invalid_argument("artifact_key is required"));
+        }
+        if request.source_type.trim().is_empty() {
+            return Err(Status::invalid_argument("source_type is required"));
+        }
+        if request.title.trim().is_empty() {
+            return Err(Status::invalid_argument("title is required"));
+        }
+        if !artifact_anchor_present(&request) {
+            return Err(Status::invalid_argument(
+                "persist artifact requires parcel_ref, building_id, building_part_id, or anchor_geometry_wkt",
+            ));
+        }
+
+        let payload_jsonb = parse_json_object_str(&request.payload_json, "payload_json")?;
+        let anchor_payload_jsonb =
+            parse_json_object_str(&request.anchor_payload_json, "anchor_payload_json")?;
+        let building_id = optional_uuid_status(&request.building_id, "building_id")?;
+        let building_part_id =
+            optional_uuid_status(&request.building_part_id, "building_part_id")?;
+        let anchor_kind = normalized_anchor_kind(&request.anchor_kind);
+
+        let pool = self
+            .state
+            .db_pool()
+            .ok_or_else(|| Status::unavailable("DATABASE_URL is required for PersistArtifact"))?;
+        let mut tx = pool.begin().await.map_err(map_db_error)?;
+        let tenant_id = resolve_tenant_uuid(&mut tx, tenant.as_str()).await?;
+        set_tx_tenant_uuid(&mut tx, tenant_id).await?;
+        let parcel_id = resolve_optional_parcel_uuid(&mut tx, tenant_id, &request.parcel_ref).await?;
+
+        let artifact_id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO artifacts (
+              tenant_id, artifact_key, source_type, title, uri, citation,
+              captured_at_ms, payload_jsonb, updated_at
+            )
+            VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7, $8, now())
+            ON CONFLICT (tenant_id, artifact_key) DO UPDATE
+            SET source_type = EXCLUDED.source_type,
+                title = EXCLUDED.title,
+                uri = EXCLUDED.uri,
+                citation = EXCLUDED.citation,
+                captured_at_ms = EXCLUDED.captured_at_ms,
+                payload_jsonb = EXCLUDED.payload_jsonb,
+                updated_at = now()
+            RETURNING id
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(request.artifact_key.trim())
+        .bind(request.source_type.trim())
+        .bind(request.title.trim())
+        .bind(request.uri.trim())
+        .bind(request.citation.trim())
+        .bind(request.captured_at_ms)
+        .bind(SqlJson(payload_jsonb))
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_db_error)?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM artifact_anchors
+            WHERE tenant_id = $1 AND artifact_id = $2 AND anchor_kind = $3
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(artifact_id)
+        .bind(anchor_kind)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db_error)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO artifact_anchors (
+              tenant_id, artifact_id, parcel_id, building_id, building_part_id,
+              anchor_kind, geom, t_start_ms, t_end_ms, payload_jsonb
+            )
+            VALUES (
+              $1, $2, $3, $4, $5, $6,
+              CASE
+                WHEN NULLIF($7, '') IS NULL THEN NULL
+                ELSE ST_GeomFromText($7, 4326)
+              END,
+              $8, $9, $10
+            )
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(artifact_id)
+        .bind(parcel_id)
+        .bind(building_id)
+        .bind(building_part_id)
+        .bind(anchor_kind)
+        .bind(request.anchor_geometry_wkt.trim())
+        .bind(request.anchor_time_start_ms)
+        .bind(request.anchor_time_end_ms)
+        .bind(SqlJson(anchor_payload_jsonb))
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db_error)?;
+
+        tx.commit().await.map_err(map_db_error)?;
+        Ok(Response::new(PersistArtifactResponse {
+            artifact_id: artifact_id.to_string(),
+            status: "persisted".to_string(),
         }))
     }
 }
@@ -372,6 +505,48 @@ fn search_result_to_json(
         "url": result.url,
         "closesGapId": result.closes_gap_id,
     })
+}
+
+fn parse_json_object_str(raw: &str, field_name: &str) -> Result<Value, Status> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(json!({}));
+    }
+    let value: Value = serde_json::from_str(trimmed).map_err(|err| {
+        Status::invalid_argument(format!("{field_name} must be valid JSON: {err}"))
+    })?;
+    if !value.is_object() {
+        return Err(Status::invalid_argument(format!(
+            "{field_name} must decode to a JSON object",
+        )));
+    }
+    Ok(value)
+}
+
+fn optional_uuid_status(value: &str, field_name: &str) -> Result<Option<Uuid>, Status> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed.parse::<Uuid>().map(Some).map_err(|err| {
+        Status::invalid_argument(format!("{field_name} must be a UUID: {err}"))
+    })
+}
+
+fn normalized_anchor_kind(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "reference"
+    } else {
+        trimmed
+    }
+}
+
+fn artifact_anchor_present(request: &PersistArtifactRequest) -> bool {
+    !request.parcel_ref.trim().is_empty()
+        || !request.building_id.trim().is_empty()
+        || !request.building_part_id.trim().is_empty()
+        || !request.anchor_geometry_wkt.trim().is_empty()
 }
 
 #[tonic::async_trait]
@@ -788,6 +963,36 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn persist_artifact_json_parser_requires_object_payload() {
+        let error = parse_json_object_str("[]", "payload_json").unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn persist_artifact_anchor_presence_accepts_parcel_ref() {
+        let request = PersistArtifactRequest {
+            tenant_context: None,
+            artifact_key: String::new(),
+            source_type: String::new(),
+            title: String::new(),
+            uri: String::new(),
+            citation: String::new(),
+            captured_at_ms: None,
+            payload_json: String::new(),
+            parcel_ref: "40-01-154-012".to_string(),
+            building_id: String::new(),
+            building_part_id: String::new(),
+            anchor_kind: String::new(),
+            anchor_geometry_wkt: String::new(),
+            anchor_time_start_ms: None,
+            anchor_time_end_ms: None,
+            anchor_payload_json: String::new(),
+        };
+        assert!(artifact_anchor_present(&request));
+        assert_eq!(normalized_anchor_kind(""), "reference");
+    }
 }
 
 // --- PostGIS-backed helpers for SpacetimeAtlasService ---------------------
@@ -1015,4 +1220,31 @@ async fn set_tx_tenant_uuid(
         .await
         .map_err(map_db_error)?;
     Ok(())
+}
+
+async fn resolve_optional_parcel_uuid(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    parcel_ref: &str,
+) -> Result<Option<Uuid>, Status> {
+    let trimmed = parcel_ref.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parsed_uuid = trimmed.parse::<Uuid>().ok();
+    sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM parcels
+        WHERE tenant_id = $1
+          AND (($2::uuid IS NOT NULL AND id = $2) OR parcel_key = $3)
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(parsed_uuid)
+    .bind(trimmed)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_db_error)
 }
