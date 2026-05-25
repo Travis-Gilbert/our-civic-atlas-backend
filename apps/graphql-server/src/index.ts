@@ -6,7 +6,11 @@ import {
 
 import { createYoga } from "@graphql-yoga/node";
 
-import { CivicAtlasGrpcClient, EventPlannerGrpcClient } from "./grpcClient.js";
+import {
+  CivicAtlasGrpcClient,
+  EventPlannerGrpcClient,
+  ReconstructionGrpcClient,
+} from "./grpcClient.js";
 import { buildContext, schema } from "./schema.js";
 import { handlePlannerSse } from "./sse/event-planner-stream.js";
 import { handlePorchfestVendorWebhook } from "./webhooks/porchfest-vendor.js";
@@ -51,6 +55,7 @@ const grpcEndpoint =
 const port = Number(process.env.PORT ?? "4010");
 const client = new CivicAtlasGrpcClient(grpcEndpoint);
 const eventPlanner = new EventPlannerGrpcClient(grpcEndpoint);
+const reconstruction = new ReconstructionGrpcClient(grpcEndpoint);
 
 // graphql-yoga masks resolver errors by default ("Unexpected error.")
 // to avoid leaking internal stack traces. In dev that's a debugging
@@ -75,7 +80,7 @@ const yoga = createYoga({
       defaultTenantId,
       sessionToken,
     );
-    return buildContext(client, eventPlanner, { actorUserId });
+    return buildContext(client, eventPlanner, reconstruction, { actorUserId });
   },
   graphqlEndpoint: "/graphql",
   maskedErrors: maskErrors,
@@ -220,4 +225,3 @@ createServer(async (req: IncomingMessage, res: ServerResponse) => {
     `  SSE: :${port}/sse/event-planner?tenantSlug=${defaultTenantId}&eventSlug=<slug>`,
   );
 });
-

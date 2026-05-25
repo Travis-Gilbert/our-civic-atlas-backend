@@ -55,6 +55,8 @@ export interface CivicResearchResponseShape {
   readonly resultsJson: string;
 }
 
+export type ReconstructionSpecShape = Record<string, unknown>;
+
 interface ListPlacesGrpcResponse {
   readonly places: CivicObject[];
   readonly nextPageToken?: string;
@@ -64,6 +66,15 @@ interface CivicResearchGrpcResponse {
   readonly runId: string;
   readonly skill: string;
   readonly resultsJson: string;
+}
+
+interface GetReconstructionSpecGrpcResponse {
+  readonly spec?: ReconstructionSpecShape | null;
+}
+
+interface ListReconstructionSpecsGrpcResponse {
+  readonly specs?: ReconstructionSpecShape[];
+  readonly nextPageToken?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -349,15 +360,21 @@ const eventPlannerProto = resolve(
   "v1",
   "event_planner.proto",
 );
+const reconstructionServiceProto = resolve(
+  protoRoot,
+  "civic_atlas",
+  "v1",
+  "reconstruction_service.proto",
+);
 
-// Both protos share the same `civic_atlas.v1` package and the
-// event_planner proto imports TenantContext from civic_atlas.proto.
+// These protos share the same `civic_atlas.v1` package and import
+// TenantContext from civic_atlas.proto.
 // loadSync accepts an array, so a single descriptor pass picks up
-// both services. keepCase:false converts snake_case proto field
+// all services. keepCase:false converts snake_case proto field
 // names (`event_layer_id`, `starts_at_ms`) to camelCase
 // (`eventLayerId`, `startsAtMs`) for the Node side.
 const packageDefinition = protoLoader.loadSync(
-  [civicAtlasProto, eventPlannerProto],
+  [civicAtlasProto, eventPlannerProto, reconstructionServiceProto],
   {
     keepCase: false,
     longs: Number,
@@ -557,15 +574,40 @@ interface EventPlannerServiceConstructor {
   new (address: string, credentials: grpc.ChannelCredentials): EventPlannerServiceClient;
 }
 
+interface ReconstructionServiceClient extends grpc.Client {
+  GetReconstructionSpec(
+    request: object,
+    metadata: grpc.Metadata,
+    callback: (
+      err: grpc.ServiceError | null,
+      response: GetReconstructionSpecGrpcResponse,
+    ) => void,
+  ): grpc.ClientUnaryCall;
+  ListReconstructionSpecs(
+    request: object,
+    metadata: grpc.Metadata,
+    callback: (
+      err: grpc.ServiceError | null,
+      response: ListReconstructionSpecsGrpcResponse,
+    ) => void,
+  ): grpc.ClientUnaryCall;
+}
+
+interface ReconstructionServiceConstructor {
+  new (address: string, credentials: grpc.ChannelCredentials): ReconstructionServiceClient;
+}
+
 const civicAtlasV1 = (protoDescriptor as Record<string, unknown>).civic_atlas as {
   readonly v1: {
     readonly CivicAtlasService: CivicAtlasServiceConstructor;
     readonly EventPlannerService: EventPlannerServiceConstructor;
+    readonly ReconstructionService: ReconstructionServiceConstructor;
   };
 };
 
 const CivicAtlasServiceCtor = civicAtlasV1.v1.CivicAtlasService;
 const EventPlannerServiceCtor = civicAtlasV1.v1.EventPlannerService;
+const ReconstructionServiceCtor = civicAtlasV1.v1.ReconstructionService;
 
 /* ------------------------------------------------------------------ */
 /*  Client                                                             */
@@ -661,6 +703,88 @@ export class CivicAtlasGrpcClient {
             skill: response.skill,
             resultsJson: response.resultsJson,
           });
+        },
+      );
+    });
+  }
+}
+
+/**
+ * gRPC client for the ReconstructionService. This is the backend bridge
+ * the public Atelier needs: the browser still talks GraphQL, while the
+ * sidecar asks Axum for canonical ReconstructionSpec rows over gRPC.
+ */
+export class ReconstructionGrpcClient {
+  private readonly client: ReconstructionServiceClient;
+
+  constructor(endpoint: string) {
+    const address = normalizeAddress(endpoint);
+    this.client = new ReconstructionServiceCtor(
+      address,
+      grpc.credentials.createInsecure(),
+    );
+  }
+
+  private metadataFor(tenantId: string): grpc.Metadata {
+    const metadata = new grpc.Metadata();
+    metadata.add("x-tenant-id", tenantId);
+    return metadata;
+  }
+
+  getReconstructionSpec(
+    tenantContext: TenantContext,
+    specId: string,
+  ): Promise<ReconstructionSpecShape> {
+    return new Promise((resolveResult, rejectResult) => {
+      this.client.GetReconstructionSpec(
+        { tenantContext, specId },
+        this.metadataFor(tenantContext.tenantId),
+        (err, response) => {
+          if (err) {
+            rejectResult(
+              new Error(
+                `ReconstructionService GetReconstructionSpec failed: ${err.code} ${err.details ?? err.message}`,
+              ),
+            );
+            return;
+          }
+          if (!response.spec) {
+            rejectResult(new Error("ReconstructionService returned no spec."));
+            return;
+          }
+          resolveResult(response.spec);
+        },
+      );
+    });
+  }
+
+  listReconstructionSpecs(
+    tenantContext: TenantContext,
+    input: {
+      readonly civicObjectId?: string;
+      readonly status?: string;
+      readonly pageSize?: number;
+    } = {},
+  ): Promise<readonly ReconstructionSpecShape[]> {
+    return new Promise((resolveResult, rejectResult) => {
+      this.client.ListReconstructionSpecs(
+        {
+          tenantContext,
+          civicObjectId: input.civicObjectId ?? "",
+          status: input.status ?? "RECONSTRUCTION_SPEC_STATUS_APPROVED",
+          pageSize: input.pageSize ?? 50,
+        },
+        this.metadataFor(tenantContext.tenantId),
+        (err, response) => {
+          if (err) {
+            rejectResult(
+              new Error(
+                `ReconstructionService ListReconstructionSpecs failed: ${err.code} ${err.details ?? err.message}`,
+              ),
+            );
+            return;
+          }
+          resolveResult(response.specs ?? []);
         },
       );
     });

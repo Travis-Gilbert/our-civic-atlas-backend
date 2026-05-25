@@ -5,6 +5,7 @@ members = [
     "crates/civic-atlas-reconstruction-engine",
     "crates/civic-atlas-server",
     "crates/civic-atlas-types",
+    "crates/rustyred-client",
     "crates/tenant-resolver",
     "crates/theseus-client",
 ]
@@ -23,6 +24,7 @@ axum = "0.7"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive", "env"] }
 prost = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
