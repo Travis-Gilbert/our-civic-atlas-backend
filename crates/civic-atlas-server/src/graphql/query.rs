@@ -1,20 +1,43 @@
 //! GraphQL Query root for the Axum-native surface.
 //!
-//! Vertical slice: ships a `version` field so we can verify the endpoint
-//! is reachable and the schema is served correctly. Subsequent commits
-//! port `reconstructionDossier`, `historicalReconstructions`, `places`,
-//! `events`, `scenarios`, `dossierFor`, etc. from the sidecar.
+//! Composed via async-graphql's MergedObject so each resolver family
+//! (reconstruction, places, scenarios, events, dossier, ...) lives in
+//! its own module and is merged into the public Query root here.
+//!
+//! Ships in this commit:
+//!   - `version` — sanity field confirming Axum-native GraphQL answered
+//!   - `reconstructionDossier(reconstructionId)` — atelier one-shot payload
+//!
+//! Next commits port: civicResearch (Mutation root), historicalReconstructions
+//! list, places, events, scenarios, dossierFor.
 
-use async_graphql::Object;
+use async_graphql::{MergedObject, Object};
 
-pub struct QueryRoot;
+use crate::graphql::reconstruction::ReconstructionQuery;
+
+pub struct CoreQuery;
 
 #[Object]
-impl QueryRoot {
+impl CoreQuery {
     /// Identifies which GraphQL implementation answered. Used by the
     /// frontend and operations to confirm traffic is hitting Axum-native
     /// GraphQL rather than the legacy Node sidecar during the migration.
     async fn version(&self) -> &'static str {
         "axum-native-graphql-v0.1"
+    }
+}
+
+#[derive(MergedObject, Default)]
+pub struct QueryRoot(CoreQuery, ReconstructionQuery);
+
+impl Default for CoreQuery {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl Default for ReconstructionQuery {
+    fn default() -> Self {
+        Self
     }
 }

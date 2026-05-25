@@ -17,6 +17,7 @@
 //! growth happens as new schema fields whose resolvers run here.
 
 pub mod query;
+pub mod reconstruction;
 
 use async_graphql::{EmptyMutation, EmptySubscription, Schema};
 use async_graphql_axum::GraphQL;
@@ -35,7 +36,7 @@ pub type CivicAtlasSchema = Schema<QueryRoot, EmptyMutation, EmptySubscription>;
 /// Construct the GraphQL schema with the AtlasState available to every
 /// resolver via async-graphql's typed context.
 pub fn build_schema(state: AtlasState) -> CivicAtlasSchema {
-    Schema::build(QueryRoot, EmptyMutation, EmptySubscription)
+    Schema::build(QueryRoot::default(), EmptyMutation, EmptySubscription)
         .data(state)
         .finish()
 }
