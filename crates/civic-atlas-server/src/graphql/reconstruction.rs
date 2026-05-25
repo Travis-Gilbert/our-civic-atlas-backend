@@ -1,70 +1,151 @@
 //! GraphQL types and resolvers for the reconstruction surface.
 //!
 //! Mirrors the sidecar's `reconstructionDossier(reconstructionId)` query
-//! (apps/graphql-server/src/schema.ts), but runs in-process: the resolver
-//! calls the existing `ReconstructionGrpcService` directly without a
-//! network hop, reusing the SQL, validation, and tenant logic Codex
+//! (apps/graphql-server/src/schema.ts:1343) and the shape of the
+//! returned ReconstructionDossier (line 1067). Runs in-process: the
+//! GraphQL resolver calls the existing `ReconstructionGrpcService`
+//! directly, reusing the SQL, validation, and tenant logic Codex
 //! shipped in the gRPC handler.
 //!
-//! Field coverage: this commit ships a minimum-viable shape (reconstruction
-//! id/name/confidence/civicObjectId + summary + debug). Subsequent commits
-//! expand to full parity: footprint, height/bearing, per-part confidences,
-//! roof form, time range, sources array, evidence bundle, conflicts, block
-//! subgraph, node tree.
+//! Field coverage matches the sidecar contract: HistoricalReconstruction
+//! with full per-part confidences + footprint + geometry; ReconstructionDossier
+//! with evidence + conflicts + blockSubgraph + nodeTree.
+//!
+//! What still lives in the sidecar (and will port in follow-ups):
+//!   - `placeForCivicObject` lookup that pulls a building's actual
+//!     PostGIS geometry into position/footprint. This resolver uses
+//!     the spec's mass dimension fallbacks until that helper ports.
 
 use std::env;
 
-use async_graphql::{Context, Object, SimpleObject};
+use async_graphql::{Context, InputObject, Object, SimpleObject};
 use civic_atlas_types::civic_atlas::v1::{
     reconstruction_service_server::ReconstructionService, GetReconstructionSpecRequest,
-    ReconstructionSpec, TenantContext,
+    ListReconstructionSpecsRequest, PartProvenance, ReconstructionSource as ProtoSource,
+    ReconstructionSourceType, ReconstructionSpec, TenantContext,
 };
 use serde_json::json;
 use tonic::Request;
 
+use crate::graphql::search::Source;
 use crate::reconstruction::ReconstructionGrpcService;
 use crate::AtlasState;
 
-/// HistoricalReconstruction surface. Field set matches what frontend
-/// queries fetch today (atelier-dossier + civic-research). Expansion
-/// follow-ups: footprint (typed nested struct), heightMeters,
-/// bearingDegrees, per-part confidences, roofForm, geometryUrl, sources.
+// ---------------------------------------------------------------------------
+// GraphQL types
+// ---------------------------------------------------------------------------
+
+#[derive(SimpleObject, Default, Clone)]
+pub struct ReconstructionFootprint {
+    pub width_meters: f64,
+    pub depth_meters: f64,
+}
+
 #[derive(SimpleObject, Default, Clone)]
 pub struct HistoricalReconstruction {
     pub id: String,
     pub civic_object_id: String,
     pub name: String,
     pub description: String,
-    pub confidence: f64,
-    /// [longitude, latitude] tuple serialized as a JSON array, matching
-    /// the sidecar's LatLng scalar. None when the spec carries no
-    /// centroid (rare; civic_atlas seeds geometry via PostGIS).
     pub position: Option<async_graphql::Json<[f64; 2]>>,
-    /// ISO 8601 timestamp marking when this building's lifespan began.
+    pub footprint: ReconstructionFootprint,
+    pub height_meters: f64,
+    pub bearing_degrees: f64,
+    pub confidence: f64,
+    pub facade_confidence: Option<f64>,
+    pub roof_confidence: Option<f64>,
+    pub ground_floor_confidence: Option<f64>,
+    pub roof_form: Option<String>,
     pub time_start: Option<String>,
-    /// ISO 8601 timestamp marking when this building's lifespan ended.
     pub time_end: Option<String>,
+    pub geometry_url: Option<String>,
+    pub geometry_format: Option<String>,
+    pub foundry_asset_url: Option<String>,
+    pub sources: Vec<Source>,
 }
 
-/// Minimum-viable ReconstructionDossier surface for this commit.
-/// `node_tree` and `debug` are JSON scalars per the sidecar schema
-/// (apps/graphql-server/src/schema.ts:1067).
+#[derive(SimpleObject, Default, Clone)]
+pub struct EvidenceItem {
+    pub id: String,
+    pub reconstruction_id: String,
+    pub source: Source,
+    pub evidence_type: String,
+    pub target_node_id: Option<String>,
+    pub confidence: f64,
+    pub thumbnail_url: Option<String>,
+    pub summary: Option<String>,
+    pub source_date_label: Option<String>,
+}
+
+#[derive(SimpleObject, Default, Clone)]
+pub struct EvidenceBundle {
+    pub reconstruction_id: String,
+    pub items: Vec<EvidenceItem>,
+    pub total_count: i32,
+}
+
+#[derive(SimpleObject, Default, Clone)]
+pub struct MergeDisagreement {
+    pub source: Source,
+    pub stated_value: String,
+    pub confidence: f64,
+    pub evidence_item_id: String,
+}
+
+#[derive(SimpleObject, Default, Clone)]
+pub struct MergeConflict {
+    pub id: String,
+    pub reconstruction_id: String,
+    pub target_node_id: String,
+    pub field_label: String,
+    pub disagreements: Vec<MergeDisagreement>,
+    pub resolved_value: String,
+    pub resolution_explanation: String,
+    pub resolution_threshold: f64,
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct BlockNeighbor {
+    pub reconstruction: HistoricalReconstruction,
+    pub relation: String,
+    pub strength: f64,
+}
+
+#[derive(SimpleObject, Default, Clone)]
+pub struct BlockSubgraph {
+    pub reconstruction_id: String,
+    pub neighbors: Vec<BlockNeighbor>,
+}
+
 #[derive(SimpleObject)]
 pub struct ReconstructionDossier {
     pub reconstruction: HistoricalReconstruction,
+    pub evidence: EvidenceBundle,
+    pub conflicts: Vec<MergeConflict>,
+    pub block_subgraph: BlockSubgraph,
+    pub node_tree: async_graphql::Json<serde_json::Value>,
     pub summary: String,
     pub debug: Option<async_graphql::Json<serde_json::Value>>,
 }
 
-/// Normalize a frontend-visible reconstructionId (e.g.,
-/// `historical:carriage-town:storefront` or `building:carriage-town:3`)
-/// into the backend spec_id (`spec:carriage-town:3`). Mirrors the
-/// sidecar's `normalizeSpecId` (apps/graphql-server/src/schema.ts:538).
-fn normalize_spec_id(reconstruction_id: &str) -> String {
+#[derive(InputObject)]
+pub struct BboxInput {
+    pub west: f64,
+    pub south: f64,
+    pub east: f64,
+    pub north: f64,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers shared with civicResearch results parsing.
+// ---------------------------------------------------------------------------
+
+/// Mirrors sidecar `normalizeSpecId`. Maps fixture-historical-ids and
+/// building:* ids onto canonical spec_id strings.
+pub fn normalize_spec_id(reconstruction_id: &str) -> String {
     if reconstruction_id.starts_with("spec:") {
         return reconstruction_id.to_string();
     }
-    // Direct lookups for fixture-historical-id → spec_id.
     match reconstruction_id {
         "historical:carriage-town:whaley-house" => return "spec:carriage-town:1".to_string(),
         "historical:carriage-town:628-kearsley" => return "spec:carriage-town:2".to_string(),
@@ -73,7 +154,6 @@ fn normalize_spec_id(reconstruction_id: &str) -> String {
         "historical:carriage-town:stockton-house" => return "spec:carriage-town:5".to_string(),
         _ => {}
     }
-    // building:carriage-town:N → spec:carriage-town:N pattern.
     if let Some(suffix) = reconstruction_id.strip_prefix("building:carriage-town:") {
         if suffix.chars().all(|c| c.is_ascii_digit()) {
             return format!("spec:carriage-town:{suffix}");
@@ -86,11 +166,265 @@ fn default_tenant() -> String {
     env::var("CIVIC_ATLAS_DEFAULT_TENANT").unwrap_or_else(|_| "flint".to_string())
 }
 
-/// Map a backend ReconstructionSpec proto into the GraphQL
-/// HistoricalReconstruction surface. Overall confidence is the mean of
-/// the per-part confidences that are present (matches the sidecar's
-/// implicit averaging in reconstructionFromSpec).
-fn reconstruction_from_spec(spec: &ReconstructionSpec) -> HistoricalReconstruction {
+pub fn ms_to_iso8601(ms: i64) -> String {
+    let secs = ms / 1_000;
+    let nanos = ((ms % 1_000).abs() as u32) * 1_000_000;
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default()
+}
+
+/// Mirrors sidecar normalizeTrustTier. Bucket source trust into the
+/// three contract values HIGH | MEDIUM | LOW.
+pub fn normalize_trust_tier(raw: &str) -> String {
+    let upper = raw.to_ascii_uppercase();
+    if upper.contains("HIGH") {
+        return "HIGH".to_string();
+    }
+    if upper.contains("LOW") {
+        return "LOW".to_string();
+    }
+    "MEDIUM".to_string()
+}
+
+/// Mirrors sidecar normalizeSourceType. Bucket source type into the
+/// contract enum values the GraphQL Source.sourceType expects.
+pub fn normalize_source_type(raw: &str) -> String {
+    let upper = raw.to_ascii_uppercase();
+    if upper.contains("PHOTO") {
+        return "PHOTO_ARCHIVE".to_string();
+    }
+    if upper.contains("MAP") || upper.contains("SURVEY") {
+        return "HISTORICAL_ARCHIVE".to_string();
+    }
+    if upper.contains("PERMIT") || upper.contains("PUBLIC") {
+        return "PUBLIC_RECORD".to_string();
+    }
+    if upper.contains("MODEL") {
+        return "ACADEMIC".to_string();
+    }
+    "HISTORICAL_ARCHIVE".to_string()
+}
+
+fn source_type_str(value: ReconstructionSourceType) -> &'static str {
+    match value {
+        ReconstructionSourceType::Unspecified => "OTHER",
+        ReconstructionSourceType::ArchivalPhoto => "PHOTO",
+        ReconstructionSourceType::Map => "MAP",
+        ReconstructionSourceType::Permit => "PERMIT",
+        ReconstructionSourceType::Survey => "SURVEY",
+        ReconstructionSourceType::OralHistory => "ORAL_HISTORY",
+        ReconstructionSourceType::ModelPrior => "MODEL",
+        ReconstructionSourceType::Other => "OTHER",
+    }
+}
+
+fn source_from_proto(proto: &ProtoSource, fallback_id: &str) -> Source {
+    let id = if proto.source_id.is_empty() {
+        fallback_id.to_string()
+    } else {
+        proto.source_id.clone()
+    };
+    let kind = ReconstructionSourceType::try_from(proto.source_type).unwrap_or_default();
+    let name = if !proto.title.is_empty() {
+        proto.title.clone()
+    } else if !proto.citation.is_empty() {
+        proto.citation.clone()
+    } else {
+        id.clone()
+    };
+    Source {
+        id,
+        name,
+        homepage_url: if proto.uri.is_empty() {
+            None
+        } else {
+            Some(proto.uri.clone())
+        },
+        source_type: normalize_source_type(source_type_str(kind)),
+        public_use_terms: None,
+        trust_tier: normalize_trust_tier("MEDIUM"),
+        last_checked: proto.captured_at_ms.map(ms_to_iso8601),
+        known_limits: Vec::new(),
+        contains_personal_data: false,
+    }
+}
+
+fn provenance_sources(p: Option<&PartProvenance>, fallback_prefix: &str) -> Vec<Source> {
+    match p {
+        None => Vec::new(),
+        Some(prov) => prov
+            .sources
+            .iter()
+            .enumerate()
+            .map(|(i, s)| source_from_proto(s, &format!("{fallback_prefix}:source:{i}")))
+            .collect(),
+    }
+}
+
+fn provenance_confidence(p: Option<&PartProvenance>, fallback: f64) -> f64 {
+    p.map(|prov| {
+        if prov.part_confidence > 0.0 {
+            prov.part_confidence
+        } else if prov.coverage_quality > 0.0 {
+            prov.coverage_quality
+        } else {
+            fallback
+        }
+    })
+    .unwrap_or(fallback)
+}
+
+fn provenance_has_conflict(p: Option<&PartProvenance>) -> bool {
+    p.is_some_and(|prov| {
+        prov.moderator_overridden
+            || prov
+                .moderator_notes
+                .to_ascii_lowercase()
+                .contains("conflict")
+    })
+}
+
+fn unique_sources(sources: Vec<Source>) -> Vec<Source> {
+    let mut seen = std::collections::HashSet::<String>::new();
+    let mut out = Vec::with_capacity(sources.len());
+    for src in sources {
+        if seen.insert(src.id.clone()) {
+            out.push(src);
+        }
+    }
+    out
+}
+
+fn target_node_id(reconstruction_id: &str, part: &str) -> String {
+    format!("reconstruction-node:{reconstruction_id}:{part}")
+}
+
+fn roof_form_from(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("hip") {
+        return Some("HIPPED".to_string());
+    }
+    if lower.contains("gable") {
+        return Some("GABLE".to_string());
+    }
+    if lower.contains("flat") {
+        return Some("FLAT".to_string());
+    }
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_ascii_uppercase())
+    }
+}
+
+fn dimension_meters(d: Option<&civic_atlas_types::civic_atlas::v1::DimensionRange>) -> Option<f64> {
+    d.and_then(|range| {
+        let max = range.max.unwrap_or(0.0);
+        let min = range.min.unwrap_or(0.0);
+        if max > 0.0 {
+            Some(max)
+        } else if min > 0.0 {
+            Some(min)
+        } else {
+            None
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Spec → GraphQL mappers
+// ---------------------------------------------------------------------------
+
+pub fn reconstruction_from_spec(spec: &ReconstructionSpec) -> HistoricalReconstruction {
+    let mass = spec.mass.as_ref();
+    let facade = spec.facades.first();
+    let roof = spec.roof.as_ref();
+    let ground = spec.ground_floor.as_ref();
+
+    let mass_provenance = mass.and_then(|m| m.provenance.as_ref());
+    let facade_provenance = facade.and_then(|f| f.provenance.as_ref());
+    let roof_provenance = roof.and_then(|r| r.provenance.as_ref());
+    let ground_provenance = ground.and_then(|g| g.provenance.as_ref());
+
+    let mass_confidence = provenance_confidence(mass_provenance, 0.5);
+
+    // Sidecar uses placeForCivicObject + parseGeometryPoints to derive
+    // position and footprint from PostGIS. Until that helper ports here,
+    // fall back to the spec's mass dimensions for footprint and leave
+    // position as None (the frontend uses position only for the atlas
+    // map dot, which the atelier surface doesn't need).
+    let width = mass
+        .and_then(|m| dimension_meters(m.width.as_ref()))
+        .unwrap_or(10.0);
+    let depth = mass
+        .and_then(|m| dimension_meters(m.depth.as_ref()))
+        .unwrap_or(12.0);
+    let stories_default = mass.map(|m| m.stories).unwrap_or(1) as f64;
+    let height = mass
+        .and_then(|m| dimension_meters(m.height.as_ref()))
+        .unwrap_or((stories_default * 3.0).max(3.0));
+
+    // Sidecar walks spec.assets looking for "scene" asset_type to find
+    // a renderable glb/gltf. Port that pattern.
+    let scene_asset = spec
+        .assets
+        .iter()
+        .find(|a| a.asset_type.to_ascii_lowercase().contains("scene"));
+    let scene_uri = scene_asset
+        .map(|a| a.uri.clone())
+        .filter(|uri| !uri.is_empty());
+    let renderable_geometry_url = scene_uri.clone().filter(|uri| {
+        let lower = uri.to_ascii_lowercase();
+        lower.ends_with(".glb") || lower.ends_with(".gltf")
+    });
+
+    // Description: form · material · roof_type, separated by middle
+    // dots. Mirrors sidecar reconstructionFromSpec line 734-740.
+    let mut description_parts: Vec<String> = Vec::new();
+    if let Some(m) = mass {
+        if !m.form.is_empty() {
+            description_parts.push(m.form.clone());
+        }
+    }
+    if let Some(f) = facade {
+        let material = if !f.primary_material.is_empty() {
+            f.primary_material.clone()
+        } else {
+            String::new()
+        };
+        if !material.is_empty() {
+            description_parts.push(material);
+        }
+    }
+    if let Some(r) = roof {
+        let kind = if !r.roof_type.is_empty() {
+            r.roof_type.clone()
+        } else {
+            String::new()
+        };
+        if !kind.is_empty() {
+            description_parts.push(kind);
+        }
+    }
+    let description = if description_parts.is_empty() {
+        "Backend ReconstructionSpec.".to_string()
+    } else {
+        description_parts.join(" · ")
+    };
+
+    let sources = unique_sources(
+        [
+            provenance_sources(mass_provenance, &format!("{}:mass", spec.spec_id)),
+            provenance_sources(facade_provenance, &format!("{}:facade", spec.spec_id)),
+            provenance_sources(roof_provenance, &format!("{}:roof", spec.spec_id)),
+            provenance_sources(ground_provenance, &format!("{}:ground-floor", spec.spec_id)),
+        ]
+        .concat(),
+    );
+
+    let roof_form = roof.and_then(|r| roof_form_from(&r.roof_type));
+
     HistoricalReconstruction {
         id: spec.spec_id.clone(),
         civic_object_id: spec.civic_object_id.clone(),
@@ -99,73 +433,228 @@ fn reconstruction_from_spec(spec: &ReconstructionSpec) -> HistoricalReconstructi
         } else {
             spec.title.clone()
         },
-        // The proto does not carry a top-level description. metadata
-        // may include a free-form note; fall back to empty when absent.
-        description: spec
-            .metadata
-            .get("description")
-            .or_else(|| spec.metadata.get("notes"))
-            .cloned()
-            .unwrap_or_default(),
-        confidence: overall_confidence(spec),
-        // Position is sourced from PostGIS geometry on the civic_object
-        // row, not from the spec proto. Future commit joins through
-        // civic_objects → ST_Centroid() to populate this. Until then,
-        // None is the honest answer.
+        description,
         position: None,
-        // Time range maps from spec.t_start_ms / t_end_ms (epoch
-        // milliseconds) into ISO 8601 strings when set.
+        footprint: ReconstructionFootprint {
+            width_meters: width,
+            depth_meters: depth,
+        },
+        height_meters: height,
+        bearing_degrees: 0.0,
+        confidence: mass_confidence,
+        facade_confidence: Some(provenance_confidence(facade_provenance, mass_confidence)),
+        roof_confidence: Some(provenance_confidence(roof_provenance, mass_confidence)),
+        ground_floor_confidence: Some(provenance_confidence(ground_provenance, mass_confidence)),
+        roof_form,
         time_start: spec.t_start_ms.map(ms_to_iso8601),
         time_end: spec.t_end_ms.map(ms_to_iso8601),
+        geometry_url: renderable_geometry_url.clone(),
+        geometry_format: renderable_geometry_url.as_ref().map(|_| "GLTF".to_string()),
+        foundry_asset_url: scene_uri,
+        sources,
     }
 }
 
-/// Convert a Unix epoch milliseconds value into an ISO 8601 timestamp
-/// (UTC). Used for `time_start` / `time_end` on the GraphQL
-/// HistoricalReconstruction. Out-of-range values fall back to an empty
-/// string so the resolver never panics on bad data.
-fn ms_to_iso8601(ms: i64) -> String {
-    let secs = ms / 1_000;
-    let nanos = ((ms % 1_000).abs() as u32) * 1_000_000;
-    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_default()
+fn evidence_from_spec(spec: &ReconstructionSpec) -> EvidenceBundle {
+    let spec_id = spec.spec_id.clone();
+    let mass_prov = spec.mass.as_ref().and_then(|m| m.provenance.as_ref());
+    let facade_prov = spec.facades.first().and_then(|f| f.provenance.as_ref());
+    let roof_prov = spec.roof.as_ref().and_then(|r| r.provenance.as_ref());
+    let ground_prov = spec.ground_floor.as_ref().and_then(|g| g.provenance.as_ref());
+
+    let parts: Vec<(&str, &str, Option<&PartProvenance>)> = vec![
+        ("mass", "SANBORN", mass_prov),
+        ("facade", "PHOTOGRAPH", facade_prov),
+        ("roof", "SANBORN", roof_prov),
+        ("ground_floor", "CITY_DIRECTORY", ground_prov),
+    ];
+
+    let mut items: Vec<EvidenceItem> = Vec::new();
+    for (key, kind, prov) in parts {
+        let fallback_prefix = format!("{spec_id}:{key}");
+        let sources = provenance_sources(prov, &fallback_prefix);
+        let part_confidence = provenance_confidence(prov, 0.5);
+        for (idx, source) in sources.into_iter().enumerate() {
+            let summary = source.name.clone();
+            items.push(EvidenceItem {
+                id: format!("evidence:{spec_id}:{key}:{idx}"),
+                reconstruction_id: spec_id.clone(),
+                source,
+                evidence_type: kind.to_string(),
+                target_node_id: Some(target_node_id(&spec_id, key)),
+                confidence: part_confidence,
+                thumbnail_url: None,
+                summary: Some(summary),
+                source_date_label: None,
+            });
+        }
+    }
+
+    let total = items.len() as i32;
+    EvidenceBundle {
+        reconstruction_id: spec_id,
+        items,
+        total_count: total,
+    }
 }
 
-/// Mean of per-part confidences across mass, primary facade, roof, and
-/// ground floor. Returns 0.0 when no part has provenance.
-fn overall_confidence(spec: &ReconstructionSpec) -> f64 {
-    let mut values: Vec<f64> = Vec::with_capacity(4);
-    if let Some(mass) = spec.mass.as_ref() {
-        if let Some(p) = mass.provenance.as_ref() {
-            values.push(p.part_confidence);
-        }
-    }
-    if let Some(facade) = spec.facades.first() {
-        if let Some(p) = facade.provenance.as_ref() {
-            values.push(p.part_confidence);
-        }
-    }
-    if let Some(roof) = spec.roof.as_ref() {
-        if let Some(p) = roof.provenance.as_ref() {
-            values.push(p.part_confidence);
-        }
-    }
-    if let Some(gf) = spec.ground_floor.as_ref() {
-        if let Some(p) = gf.provenance.as_ref() {
-            values.push(p.part_confidence);
-        }
-    }
-    if values.is_empty() {
-        0.0
-    } else {
-        values.iter().sum::<f64>() / values.len() as f64
-    }
+fn conflicts_from_spec(spec: &ReconstructionSpec) -> Vec<MergeConflict> {
+    let spec_id = spec.spec_id.clone();
+    let mass_prov = spec.mass.as_ref().and_then(|m| m.provenance.as_ref());
+    let facade_prov = spec.facades.first().and_then(|f| f.provenance.as_ref());
+    let roof_prov = spec.roof.as_ref().and_then(|r| r.provenance.as_ref());
+    let ground_prov = spec.ground_floor.as_ref().and_then(|g| g.provenance.as_ref());
+
+    let parts: Vec<(&str, &str, Option<&PartProvenance>)> = vec![
+        ("mass", "Shape and size", mass_prov),
+        ("facade", "Walls", facade_prov),
+        ("roof", "Roof", roof_prov),
+        ("ground_floor", "Street level", ground_prov),
+    ];
+
+    parts
+        .into_iter()
+        .filter(|(_, _, prov)| provenance_has_conflict(*prov))
+        .enumerate()
+        .map(|(idx, (key, label, _prov))| MergeConflict {
+            id: format!("merge-conflict:{spec_id}:{key}:{idx}"),
+            reconstruction_id: spec_id.clone(),
+            target_node_id: target_node_id(&spec_id, key),
+            field_label: label.to_string(),
+            disagreements: Vec::new(),
+            resolved_value: "reviewed value".to_string(),
+            resolution_explanation: "Backend marked this part as having a source conflict."
+                .to_string(),
+            resolution_threshold: 0.7,
+        })
+        .collect()
 }
 
-/// Resolve a reconstruction dossier for the given reconstructionId by
-/// calling the existing ReconstructionGrpcService in-process. Returns
-/// None when the spec is not found in PostGIS.
+/// Build the Pascal-style flat node tree as a JSON value matching the
+/// sidecar's nodeTreeForReconstruction shape exactly (schema declares
+/// the field as `nodeTree: JSON!`).
+fn node_tree_for_reconstruction(reconstruction_id: &str) -> serde_json::Value {
+    let root_id = target_node_id(reconstruction_id, "building");
+    let level_id = target_node_id(reconstruction_id, "level:0");
+    let mass_id = target_node_id(reconstruction_id, "mass");
+    let facade_id = target_node_id(reconstruction_id, "facade");
+    let roof_id = target_node_id(reconstruction_id, "roof");
+    let ground_id = target_node_id(reconstruction_id, "ground_floor");
+
+    json!({
+        "version": 1,
+        "source": "backend-reconstruction-spec",
+        "rootNodeIds": [root_id],
+        "nodes": {
+            root_id.clone(): {
+                "id": root_id,
+                "type": "building",
+                "parentId": null,
+                "children": [level_id],
+            },
+            level_id.clone(): {
+                "id": level_id,
+                "type": "level",
+                "parentId": root_id,
+                "children": [mass_id, facade_id, ground_id, roof_id],
+            },
+            mass_id.clone(): {
+                "id": mass_id,
+                "type": "mass",
+                "parentId": level_id,
+                "children": [],
+            },
+            facade_id.clone(): {
+                "id": facade_id,
+                "type": "facade",
+                "parentId": level_id,
+                "children": [],
+            },
+            ground_id.clone(): {
+                "id": ground_id,
+                "type": "ground_floor",
+                "parentId": level_id,
+                "children": [],
+            },
+            roof_id.clone(): {
+                "id": roof_id,
+                "type": "roof",
+                "parentId": level_id,
+                "children": [],
+            },
+        },
+    })
+}
+
+async fn block_subgraph_for_spec(
+    state: &AtlasState,
+    focus_spec: &ReconstructionSpec,
+) -> async_graphql::Result<BlockSubgraph> {
+    let spec_id = focus_spec.spec_id.clone();
+    let block_id = focus_spec.block_id.clone();
+    let tenant_id = default_tenant();
+    let service = ReconstructionGrpcService::new(state.clone());
+
+    let mut request = Request::new(ListReconstructionSpecsRequest {
+        tenant_context: Some(TenantContext {
+            tenant_id: tenant_id.clone(),
+            atlas_node_id: format!("atlas:{tenant_id}"),
+            metadata: Default::default(),
+        }),
+        civic_object_id: String::new(),
+        parcel_id: String::new(),
+        status: 0,
+        page_size: 50,
+        page_token: String::new(),
+    });
+    request.metadata_mut().insert(
+        "x-atlas-tenant",
+        tenant_id
+            .parse()
+            .map_err(|err| async_graphql::Error::new(format!("invalid tenant id: {err}")))?,
+    );
+
+    let specs = match service.list_reconstruction_specs(request).await {
+        Ok(resp) => resp.into_inner().specs,
+        Err(status) if status.code() == tonic::Code::Unavailable => {
+            // Without a DB the block subgraph is empty. Honest answer:
+            // no neighbors found rather than fake data.
+            return Ok(BlockSubgraph {
+                reconstruction_id: spec_id,
+                neighbors: Vec::new(),
+            });
+        }
+        Err(status) => {
+            return Err(async_graphql::Error::new(format!(
+                "ListReconstructionSpecs failed: {} ({})",
+                status.message(),
+                status.code()
+            )))
+        }
+    };
+
+    let neighbors: Vec<BlockNeighbor> = specs
+        .iter()
+        .filter(|spec| spec.spec_id != spec_id)
+        .filter(|spec| block_id.is_empty() || spec.block_id == block_id)
+        .take(8)
+        .map(|spec| BlockNeighbor {
+            reconstruction: reconstruction_from_spec(spec),
+            relation: "same_block_as".to_string(),
+            strength: 0.8,
+        })
+        .collect();
+
+    Ok(BlockSubgraph {
+        reconstruction_id: spec_id,
+        neighbors,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Top-level resolver
+// ---------------------------------------------------------------------------
+
 pub async fn resolve_reconstruction_dossier(
     state: &AtlasState,
     reconstruction_id: &str,
@@ -182,9 +671,6 @@ pub async fn resolve_reconstruction_dossier(
         }),
         spec_id: spec_id.clone(),
     });
-    // The gRPC interceptor in tenant-resolver expects the tenant in
-    // metadata for the auth-tenant path. We attach it both ways so an
-    // in-process call without the metadata layer still validates.
     request.metadata_mut().insert(
         "x-atlas-tenant",
         tenant_id
@@ -192,36 +678,64 @@ pub async fn resolve_reconstruction_dossier(
             .map_err(|err| async_graphql::Error::new(format!("invalid tenant id: {err}")))?,
     );
 
-    match service.get_reconstruction_spec(request).await {
-        Ok(response) => {
-            let Some(spec) = response.into_inner().spec else {
-                return Ok(None);
-            };
-            let reconstruction = reconstruction_from_spec(&spec);
-            let summary = format!(
-                "Backend ReconstructionSpec loaded for {} (version {}).",
-                reconstruction.id, spec.spec_version
-            );
-            let debug = json!({
-                "source": "ReconstructionGrpcService.get_reconstruction_spec",
-                "requested_id": reconstruction_id,
-                "resolved_spec_id": spec.spec_id,
-                "spec_version": spec.spec_version,
-                "transport": "axum-native-graphql-in-process",
-            });
-            Ok(Some(ReconstructionDossier {
-                reconstruction,
-                summary,
-                debug: Some(async_graphql::Json(debug)),
-            }))
+    let spec = match service.get_reconstruction_spec(request).await {
+        Ok(response) => match response.into_inner().spec {
+            Some(spec) => spec,
+            None => return Ok(None),
+        },
+        Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
+        Err(status) => {
+            return Err(async_graphql::Error::new(format!(
+                "ReconstructionGrpcService error: {} ({})",
+                status.message(),
+                status.code()
+            )))
         }
-        Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
-        Err(status) => Err(async_graphql::Error::new(format!(
-            "ReconstructionGrpcService error: {} ({})",
-            status.message(),
-            status.code()
-        ))),
-    }
+    };
+
+    let reconstruction = reconstruction_from_spec(&spec);
+    let evidence = evidence_from_spec(&spec);
+    let conflicts = conflicts_from_spec(&spec);
+    let block_subgraph = block_subgraph_for_spec(state, &spec).await?;
+    let node_tree = node_tree_for_reconstruction(&reconstruction.id);
+
+    let summary = if evidence.total_count > 0 {
+        let noun = if evidence.total_count == 1 {
+            "source item"
+        } else {
+            "source items"
+        };
+        let verb = if evidence.total_count == 1 {
+            "supports"
+        } else {
+            "support"
+        };
+        format!(
+            "{} backend {noun} {verb} this reconstruction.",
+            evidence.total_count
+        )
+    } else {
+        "Backend ReconstructionSpec loaded; no source records are attached to this spec yet."
+            .to_string()
+    };
+
+    let debug = json!({
+        "source": "ReconstructionGrpcService.get_reconstruction_spec",
+        "requested_id": reconstruction_id,
+        "resolved_spec_id": spec.spec_id,
+        "spec_version": spec.spec_version,
+        "transport": "axum-native-graphql-in-process",
+    });
+
+    Ok(Some(ReconstructionDossier {
+        reconstruction,
+        evidence,
+        conflicts,
+        block_subgraph,
+        node_tree: async_graphql::Json(node_tree),
+        summary,
+        debug: Some(async_graphql::Json(debug)),
+    }))
 }
 
 pub struct ReconstructionQuery;

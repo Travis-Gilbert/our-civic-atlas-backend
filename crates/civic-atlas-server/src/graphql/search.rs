@@ -66,8 +66,13 @@ pub struct SpatialEvent {
 pub struct Source {
     pub id: String,
     pub name: String,
+    pub homepage_url: Option<String>,
     pub source_type: String,
+    pub public_use_terms: Option<String>,
     pub trust_tier: String,
+    pub last_checked: Option<String>,
+    pub known_limits: Vec<String>,
+    pub contains_personal_data: bool,
 }
 
 #[derive(SimpleObject, Default, Clone)]
