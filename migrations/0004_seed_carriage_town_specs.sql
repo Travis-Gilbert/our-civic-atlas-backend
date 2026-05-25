@@ -48,43 +48,42 @@ BEGIN
     'block_id', in_block_id,
     'title', in_title,
     'status', 'approved',
-    'spec_version', 1,
-    'license', 'CC-BY-4.0',
+    'version', 1,
     'mass', jsonb_build_object(
       'provenance', jsonb_build_object(
         'sources', '[]'::jsonb,
-        'part_confidence', in_confidence,
+        'confidence', in_confidence,
         'from_gnn_prior', false,
-        'moderator_notes', 'hand-encoded seed'
+        'reviewer_note', 'hand-encoded seed'
       ),
       'form', in_mass_form,
-      'stories', in_story_count
+      'story_count', in_story_count
     ),
     'facades', jsonb_build_array(
       jsonb_build_object(
         'provenance', jsonb_build_object(
           'sources', '[]'::jsonb,
-          'part_confidence', in_confidence,
+          'confidence', in_confidence,
           'from_gnn_prior', false
         ),
-        'facade_side', 'south',
-        'primary_material', in_facade_material,
+        'orientation', 'south',
+        'material', in_facade_material,
         'color', in_facade_color
       )
     ),
     'roof', jsonb_build_object(
       'provenance', jsonb_build_object(
         'sources', '[]'::jsonb,
-        'part_confidence', in_confidence,
+        'confidence', in_confidence,
         'from_gnn_prior', false
       ),
-      'roof_type', in_roof_form,
-      'roof_material', in_roof_material
+      'form', in_roof_form,
+      'material', in_roof_material
     ),
     'ground_floor', jsonb_build_object(
       'provenance', jsonb_build_object(
         'sources', '[]'::jsonb,
-        'part_confidence', in_confidence * 0.9,
+        'confidence', in_confidence * 0.9,
         'from_gnn_prior', false
       ),
       'use_type', 'residential',
@@ -130,7 +129,7 @@ BEGIN
     jsonb_build_object(
       'projectionKind', 'BuildingPresence',
       'specId', in_spec_id,
-      'specVersion', 1,
+      'version', 1,
       'buildingId', building_uuid::text,
       'civicObjectId', in_civic_object_id
     ),
