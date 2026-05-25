@@ -15,3 +15,5 @@ pub mod theseus_search {
         tonic::include_proto!("theseus_search.v1");
     }
 }
+
+pub mod event_planner;

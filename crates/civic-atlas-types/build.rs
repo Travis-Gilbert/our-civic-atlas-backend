@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "../../proto/civic_atlas/v1/reconstruction_service.proto",
             "../../proto/civic_atlas/v1/spacetime_atlas.proto",
             "../../proto/civic_atlas/v1/corrections.proto",
+            "../../proto/civic_atlas/v1/event_planner.proto",
             "../../proto/theseus_bridge/v1/bridge.proto",
             "../../proto/theseus_search/v1/search.proto",
         ],
@@ -20,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=../../proto/civic_atlas/v1/reconstruction_service.proto");
     println!("cargo:rerun-if-changed=../../proto/civic_atlas/v1/spacetime_atlas.proto");
     println!("cargo:rerun-if-changed=../../proto/civic_atlas/v1/corrections.proto");
+    println!("cargo:rerun-if-changed=../../proto/civic_atlas/v1/event_planner.proto");
     println!("cargo:rerun-if-changed=../../proto/theseus_bridge/v1/bridge.proto");
     println!("cargo:rerun-if-changed=../../proto/theseus_search/v1/search.proto");
     Ok(())

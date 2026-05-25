@@ -651,11 +651,23 @@ pub fn extract_direct(
             DecodedArtifact::GisFeature { attributes, .. } => {
                 let story_count = attribute_u32_any(
                     attributes,
-                    &["stories", "story_count", "num_stories", "Cib_Storie", "Dwelling_U"],
+                    &[
+                        "stories",
+                        "story_count",
+                        "num_stories",
+                        "Cib_Storie",
+                        "Dwelling_U",
+                    ],
                 );
                 let use_type = attribute_string_any(
                     attributes,
-                    &["use_type", "Use_Type", "property_class", "Prop_Class", "LandUse"],
+                    &[
+                        "use_type",
+                        "Use_Type",
+                        "property_class",
+                        "Prop_Class",
+                        "LandUse",
+                    ],
                 );
                 let primary_material = attribute_string_any(
                     attributes,
@@ -1989,7 +2001,10 @@ fn decode_artifact(source_type: &str, payload: &Value) -> DecodedArtifact {
             use_type: optional_string_any(payload, &["useType", "use_type"]),
         };
     }
-    if lower.contains("gis_feature") || lower.contains("assessor") || lower.contains("parcel_record") {
+    if lower.contains("gis_feature")
+        || lower.contains("assessor")
+        || lower.contains("parcel_record")
+    {
         let attributes = payload
             .get("attributes")
             .or_else(|| payload.get("properties"))
@@ -2008,7 +2023,12 @@ fn decode_artifact(source_type: &str, payload: &Value) -> DecodedArtifact {
             source_layer: optional_string_any(payload, &["sourceLayer", "source_layer", "layer"]),
             capture_date_ms: i64_any(
                 payload,
-                &["captureDateMs", "capture_date_ms", "capturedAtMs", "captured_at_ms"],
+                &[
+                    "captureDateMs",
+                    "capture_date_ms",
+                    "capturedAtMs",
+                    "captured_at_ms",
+                ],
             ),
         };
     }
@@ -2019,7 +2039,12 @@ fn decode_artifact(source_type: &str, payload: &Value) -> DecodedArtifact {
             band_count: u32_any(payload, &["bandCount", "band_count"]),
             capture_date_ms: i64_any(
                 payload,
-                &["captureDateMs", "capture_date_ms", "capturedAtMs", "captured_at_ms"],
+                &[
+                    "captureDateMs",
+                    "capture_date_ms",
+                    "capturedAtMs",
+                    "captured_at_ms",
+                ],
             ),
         };
     }
@@ -2349,7 +2374,8 @@ fn value_to_u32(value: &Value) -> Option<u32> {
     if let Some(number) = value.as_u64() {
         return u32::try_from(number).ok();
     }
-    value.as_str()
+    value
+        .as_str()
         .and_then(|text| text.trim().parse::<f64>().ok())
         .and_then(|number| u32::try_from(number as i64).ok())
 }
@@ -3359,10 +3385,7 @@ mod tests {
         assert_eq!(mass.stories, 3);
         assert_eq!(mass.provenance.unwrap().part_confidence, 0.95);
         assert_eq!(direct.spec.facades[0].primary_material, "brick");
-        assert_eq!(
-            direct.spec.ground_floor.unwrap().use_type,
-            "commercial"
-        );
+        assert_eq!(direct.spec.ground_floor.unwrap().use_type, "commercial");
         assert!(direct
             .populated_fields
             .iter()

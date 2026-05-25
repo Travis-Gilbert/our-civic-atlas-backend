@@ -1,4 +1,6 @@
 pub mod corrections;
+pub mod event_planner;
+pub mod event_planner_auth;
 pub mod fixture;
 pub mod reconstruction;
 pub mod tenant_db;
@@ -15,17 +17,17 @@ use civic_atlas_types::civic_atlas::v1::{
     GetNodeResponse, GetParcelHistoryRequest, GetParcelHistoryResponse, GetPlaceRequest,
     GetPlaceResponse, GetViewportAtTimeRequest, GetViewportAtTimeResponse, HealthRequest,
     HealthResponse, ListPlacesRequest, ListPlacesResponse, PersistArtifactRequest,
-    PersistArtifactResponse, ResolveTenantRequest, ResolveTenantResponse, TenantContext,
-    TimeSlice, ViewportBounds,
+    PersistArtifactResponse, ResolveTenantRequest, ResolveTenantResponse, TenantContext, TimeSlice,
+    ViewportBounds,
 };
 use civic_atlas_types::theseus_search::v1::{
     SearchMode as TheseusSearchMode, SearchRequest as TheseusSearchRequest,
 };
-use theseus_client::TheseusClient;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, types::Json as SqlJson, PgPool, Row};
 use tenant_resolver::require_tenant_context;
+use theseus_client::TheseusClient;
 use tonic::{Request, Response, Status};
 use tracing::warn;
 use uuid::Uuid;
@@ -270,9 +272,9 @@ impl CivicAtlasService for CivicAtlasGrpcService {
             )
         })?;
 
-        let mut client = TheseusClient::connect(bridge_url).await.map_err(|err| {
-            Status::unavailable(format!("theseus bridge unreachable: {err}"))
-        })?;
+        let mut client = TheseusClient::connect(bridge_url)
+            .await
+            .map_err(|err| Status::unavailable(format!("theseus bridge unreachable: {err}")))?;
 
         // Map the public CivicResearchRequest into the canonical
         // theseus_search.v1.SearchRequest. Mode is fixed at
@@ -397,8 +399,7 @@ impl CivicAtlasService for CivicAtlasGrpcService {
         let anchor_payload_jsonb =
             parse_json_object_str(&request.anchor_payload_json, "anchor_payload_json")?;
         let building_id = optional_uuid_status(&request.building_id, "building_id")?;
-        let building_part_id =
-            optional_uuid_status(&request.building_part_id, "building_part_id")?;
+        let building_part_id = optional_uuid_status(&request.building_part_id, "building_part_id")?;
         let anchor_kind = normalized_anchor_kind(&request.anchor_kind);
 
         let pool = self
@@ -408,7 +409,8 @@ impl CivicAtlasService for CivicAtlasGrpcService {
         let mut tx = pool.begin().await.map_err(map_db_error)?;
         let tenant_id = resolve_tenant_uuid(&mut tx, tenant.as_str()).await?;
         set_tx_tenant_uuid(&mut tx, tenant_id).await?;
-        let parcel_id = resolve_optional_parcel_uuid(&mut tx, tenant_id, &request.parcel_ref).await?;
+        let parcel_id =
+            resolve_optional_parcel_uuid(&mut tx, tenant_id, &request.parcel_ref).await?;
 
         let artifact_id: Uuid = sqlx::query_scalar(
             r#"
@@ -528,9 +530,10 @@ fn optional_uuid_status(value: &str, field_name: &str) -> Result<Option<Uuid>, S
     if trimmed.is_empty() {
         return Ok(None);
     }
-    trimmed.parse::<Uuid>().map(Some).map_err(|err| {
-        Status::invalid_argument(format!("{field_name} must be a UUID: {err}"))
-    })
+    trimmed
+        .parse::<Uuid>()
+        .map(Some)
+        .map_err(|err| Status::invalid_argument(format!("{field_name} must be a UUID: {err}")))
 }
 
 fn normalized_anchor_kind(value: &str) -> &str {

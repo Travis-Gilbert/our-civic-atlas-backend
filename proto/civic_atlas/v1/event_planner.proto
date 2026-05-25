@@ -1,0 +1,434 @@
+syntax = "proto3";
+
+package civic_atlas.v1;
+
+import "civic_atlas/v1/civic_atlas.proto"; // for TenantContext
+
+// Timestamps travel as int64 milliseconds since the Unix epoch (UTC),
+// matching the convention already used by `time_start_ms` /
+// `time_end_ms` on CivicObject and the spacetime atlas surface.
+// `0` means "unset" since Phase 1 has no need for sub-millisecond
+// precision and no negative timestamps appear in civic event data.
+
+// EventPlannerService is the read/write surface for tenant-scoped
+// "event layers" — one-off civic events (Carriage Town Porchfest 2026,
+// downtown art fair, etc.) that need a map of placements (vendors,
+// music porches, parking, amenities) plus a back-of-house task list.
+//
+// Phase 1 wires the read methods. Phase 2 adds the placement/task
+// mutations needed for drag editing and assignment. Phase 3 layers
+// on day-of-event status moves. Keeping the contract here from day
+// one means the GraphQL sidecar and the frontend can mock the write
+// path against the same wire types they will eventually use against
+// real data.
+//
+// Geometry travels as a GeoJSON string (`geometry_geojson`) so the
+// proto stays agnostic of PostGIS internals. The Rust server uses
+// `ST_AsGeoJSON` on the way out and `ST_GeomFromGeoJSON` on the way
+// in.
+
+message EventLayer {
+  string id = 1;
+  string slug = 2;
+  string title = 3;
+  int64 starts_at_ms = 4;
+  int64 ends_at_ms = 5;
+  // Optional bounding polygon as GeoJSON. Empty string when unset.
+  string bounds_geojson = 6;
+}
+
+message Placement {
+  string id = 1;
+  string event_layer_id = 2;
+  string category = 3;
+  string sublabel = 4;
+  string label = 5;
+  // GeoJSON geometry (Point/Polygon/LineString). The server formats
+  // this with PostGIS `ST_AsGeoJSON` so client parsers can drop it
+  // straight into deck.gl / mapbox-gl without reshaping.
+  string geometry_geojson = 6;
+  string owner_user_id = 7;
+  string status = 8;
+  string notes = 9;
+  int64 created_at_ms = 10;
+  int64 updated_at_ms = 11;
+  // Monotonically increasing row version (bump_version trigger from
+  // migration 0012). Clients echo this back on UpdatePlacement as
+  // expected_version; the server uses it for stale-write detection.
+  int64 version = 12;
+}
+
+message Task {
+  string id = 1;
+  string event_layer_id = 2;
+  string title = 3;
+  string owner_display = 4;
+  int64 due_at_ms = 5;
+  string status = 6;
+  // Optional placement reference. Empty string when the task is not
+  // tied to a specific point on the map yet.
+  string placement_id = 7;
+  string notes = 8;
+  int64 created_at_ms = 9;
+  int64 updated_at_ms = 10;
+  // Same versioning model as Placement.
+  int64 version = 11;
+}
+
+// ---- ListEventLayers --------------------------------------------------
+
+message EventLayerListRequest {
+  TenantContext tenant_context = 1;
+}
+
+message EventLayerListResponse {
+  repeated EventLayer layers = 1;
+}
+
+// ---- ListPlacements ---------------------------------------------------
+
+message PlacementListRequest {
+  TenantContext tenant_context = 1;
+  string event_layer_slug = 2;
+}
+
+message PlacementListResponse {
+  repeated Placement placements = 1;
+}
+
+// ---- ListTasks --------------------------------------------------------
+
+message TaskListRequest {
+  TenantContext tenant_context = 1;
+  string event_layer_slug = 2;
+}
+
+message TaskListResponse {
+  repeated Task tasks = 1;
+}
+
+// ---- Mutations: placements -------------------------------------------
+
+message PlacementCreateRequest {
+  TenantContext tenant_context = 1;
+  string event_layer_slug = 2;
+  string category = 3;
+  string sublabel = 4;
+  string label = 5;
+  // GeoJSON Point (or Polygon/LineString) the client wants to drop.
+  string geometry_geojson = 6;
+  string status = 7;  // Defaults to "placed" on the server when empty.
+  string notes = 8;
+  // Caller's session user id (resolved by the GraphQL sidecar from
+  // the auth cookie). Empty string when the call is unauthenticated;
+  // server rejects on Phase 2.
+  string actor_user_id = 9;
+}
+
+message PlacementUpdateRequest {
+  TenantContext tenant_context = 1;
+  string placement_id = 2;
+  // Optimistic-concurrency check. Server runs
+  //   UPDATE ... WHERE id = $1 AND version = $expected
+  // and returns stale_write=true if the row count is zero.
+  int64 expected_version = 3;
+  // Each field has a corresponding *_present bool so the server can
+  // tell "user cleared this field to empty" from "user did not
+  // touch this field" — without slipping into proto2 optional.
+  string category = 4;
+  bool category_present = 5;
+  string sublabel = 6;
+  bool sublabel_present = 7;
+  string label = 8;
+  bool label_present = 9;
+  string geometry_geojson = 10;
+  bool geometry_present = 11;
+  string status = 12;
+  bool status_present = 13;
+  string notes = 14;
+  bool notes_present = 15;
+  string actor_user_id = 16;
+}
+
+message PlacementDeleteRequest {
+  TenantContext tenant_context = 1;
+  string placement_id = 2;
+  int64 expected_version = 3;
+  string actor_user_id = 4;
+}
+
+message PlacementMutationResponse {
+  // The current row after the mutation (or before, on stale_write).
+  // Empty on a delete that succeeded.
+  Placement placement = 1;
+  // True when the WHERE id+version match dropped to zero rows. The
+  // returned `placement` carries the server's current state so the
+  // client can reconcile without a second fetch.
+  bool stale_write = 2;
+  // True when the row was actually deleted (only meaningful on the
+  // delete RPC).
+  bool deleted = 3;
+}
+
+// ---- Mutations: tasks ------------------------------------------------
+
+message TaskCreateRequest {
+  TenantContext tenant_context = 1;
+  string event_layer_slug = 2;
+  string title = 3;
+  string owner_user_id = 4;  // Empty -> unassigned.
+  int64 due_at_ms = 5;       // 0 -> no due date.
+  string status = 6;         // Defaults to "open" when empty.
+  string placement_id = 7;   // Empty -> unlinked.
+  string notes = 8;
+  string actor_user_id = 9;
+}
+
+message TaskUpdateRequest {
+  TenantContext tenant_context = 1;
+  string task_id = 2;
+  int64 expected_version = 3;
+  string title = 4;
+  bool title_present = 5;
+  string owner_user_id = 6;
+  bool owner_present = 7;
+  int64 due_at_ms = 8;
+  bool due_at_present = 9;
+  string status = 10;
+  bool status_present = 11;
+  string placement_id = 12;
+  bool placement_present = 13;
+  string notes = 14;
+  bool notes_present = 15;
+  string actor_user_id = 16;
+}
+
+message TaskDeleteRequest {
+  TenantContext tenant_context = 1;
+  string task_id = 2;
+  int64 expected_version = 3;
+  string actor_user_id = 4;
+}
+
+message TaskMutationResponse {
+  Task task = 1;
+  bool stale_write = 2;
+  bool deleted = 3;
+}
+
+// ---- Auth ------------------------------------------------------------
+
+message AuthClaimInviteRequest {
+  TenantContext tenant_context = 1;
+  // Cleartext magic-link token. The server hashes it before lookup.
+  string token = 2;
+}
+
+message AuthClaimInviteResponse {
+  // True when the token resolved and a session was created.
+  bool success = 1;
+  string user_id = 2;
+  string display_name = 3;
+  string email = 4;
+  // Cleartext session token; the caller (Node sidecar) sets this as
+  // an HTTP-only cookie on the planner's browser.
+  string session_token = 5;
+  // Friendly explanation when success=false.
+  string error = 6;
+}
+
+message AuthResolveSessionRequest {
+  TenantContext tenant_context = 1;
+  string session_token = 2;
+}
+
+message AuthResolveSessionResponse {
+  bool authenticated = 1;
+  string user_id = 2;
+  string display_name = 3;
+  string email = 4;
+}
+
+message AuthRevokeSessionRequest {
+  TenantContext tenant_context = 1;
+  string session_token = 2;
+}
+
+message AuthRevokeSessionResponse {
+  bool revoked = 1;
+}
+
+// ---- Phase 3: notes -------------------------------------------------
+
+message PlacementNote {
+  string id = 1;
+  string placement_id = 2;
+  string event_layer_id = 3;
+  string author_user_id = 4;
+  string author_display = 5;
+  string body = 6;
+  int64 created_at_ms = 7;
+  int64 updated_at_ms = 8;
+  int64 version = 9;
+}
+
+message PlacementNoteListRequest {
+  TenantContext tenant_context = 1;
+  string placement_id = 2;
+}
+
+message PlacementNoteListResponse {
+  repeated PlacementNote notes = 1;
+}
+
+message PlacementNoteCreateRequest {
+  TenantContext tenant_context = 1;
+  string placement_id = 2;
+  string body = 3;
+  string actor_user_id = 4;
+}
+
+message PlacementNoteDeleteRequest {
+  TenantContext tenant_context = 1;
+  string note_id = 2;
+  string actor_user_id = 3;
+}
+
+message PlacementNoteMutationResponse {
+  PlacementNote note = 1;
+  bool deleted = 2;
+}
+
+// ---- Phase 3: camera bookmarks --------------------------------------
+
+message CameraBookmark {
+  string id = 1;
+  string event_layer_id = 2;
+  string name = 3;
+  double center_lng = 4;
+  double center_lat = 5;
+  double zoom = 6;
+  double pitch = 7;
+  double bearing = 8;
+  string created_by_user_id = 9;
+  int64 created_at_ms = 10;
+  int64 updated_at_ms = 11;
+  int64 version = 12;
+}
+
+message BookmarkListRequest {
+  TenantContext tenant_context = 1;
+  string event_layer_slug = 2;
+}
+
+message BookmarkListResponse {
+  repeated CameraBookmark bookmarks = 1;
+}
+
+message BookmarkCreateRequest {
+  TenantContext tenant_context = 1;
+  string event_layer_slug = 2;
+  string name = 3;
+  double center_lng = 4;
+  double center_lat = 5;
+  double zoom = 6;
+  double pitch = 7;
+  double bearing = 8;
+  string actor_user_id = 9;
+}
+
+message BookmarkUpdateRequest {
+  TenantContext tenant_context = 1;
+  string bookmark_id = 2;
+  int64 expected_version = 3;
+  string name = 4;
+  bool name_present = 5;
+  double center_lng = 6;
+  bool center_lng_present = 7;
+  double center_lat = 8;
+  bool center_lat_present = 9;
+  double zoom = 10;
+  bool zoom_present = 11;
+  double pitch = 12;
+  bool pitch_present = 13;
+  double bearing = 14;
+  bool bearing_present = 15;
+  string actor_user_id = 16;
+}
+
+message BookmarkDeleteRequest {
+  TenantContext tenant_context = 1;
+  string bookmark_id = 2;
+  int64 expected_version = 3;
+  string actor_user_id = 4;
+}
+
+message BookmarkMutationResponse {
+  CameraBookmark bookmark = 1;
+  bool stale_write = 2;
+  bool deleted = 3;
+}
+
+// ---- Phase 3: Stripe vendor intake ----------------------------------
+
+// IntakePendingVendor is the atlas-side ingestion endpoint that the
+// CTHNA porchfest-2026 Stripe webhook handler calls after a
+// successful payment. The sidecar's HTTP handler verifies the
+// HMAC signature, then forwards a sanitized payload here. The Rust
+// side inserts a placement with status='pending_placement' so the
+// planning team's map shows a gray-out pin that must be moved.
+message IntakePendingVendorRequest {
+  TenantContext tenant_context = 1;
+  string event_layer_slug = 2;
+  string business_name = 3;
+  string vendor_tier = 4;      // "food_truck" | "pop_up" | etc.
+  string contact_name = 5;
+  string contact_email = 6;
+  string needs = 7;            // free-form notes from the application
+  // Default lng/lat for the auto-placed pin. The CTHNA side picks
+  // somewhere in the central courtyard so it's obvious it needs to
+  // be moved.
+  double default_lng = 8;
+  double default_lat = 9;
+  // Idempotency key — the Stripe checkout session id. The atlas
+  // dedupes by this so a webhook retry doesn't create duplicate
+  // pins. Stored in the placement's notes blob.
+  string idempotency_key = 10;
+}
+
+message IntakePendingVendorResponse {
+  // True when a new placement was created; false when the
+  // idempotency_key matched a prior intake.
+  bool created = 1;
+  string placement_id = 2;
+}
+
+service EventPlannerService {
+  rpc ListEventLayers(EventLayerListRequest) returns (EventLayerListResponse);
+  rpc ListPlacements(PlacementListRequest) returns (PlacementListResponse);
+  rpc ListTasks(TaskListRequest) returns (TaskListResponse);
+
+  rpc CreatePlacement(PlacementCreateRequest) returns (PlacementMutationResponse);
+  rpc UpdatePlacement(PlacementUpdateRequest) returns (PlacementMutationResponse);
+  rpc DeletePlacement(PlacementDeleteRequest) returns (PlacementMutationResponse);
+
+  rpc CreateTask(TaskCreateRequest) returns (TaskMutationResponse);
+  rpc UpdateTask(TaskUpdateRequest) returns (TaskMutationResponse);
+  rpc DeleteTask(TaskDeleteRequest) returns (TaskMutationResponse);
+
+  rpc ClaimInvite(AuthClaimInviteRequest) returns (AuthClaimInviteResponse);
+  rpc ResolveSession(AuthResolveSessionRequest) returns (AuthResolveSessionResponse);
+  rpc RevokeSession(AuthRevokeSessionRequest) returns (AuthRevokeSessionResponse);
+
+  // Phase 3
+  rpc ListPlacementNotes(PlacementNoteListRequest) returns (PlacementNoteListResponse);
+  rpc CreatePlacementNote(PlacementNoteCreateRequest) returns (PlacementNoteMutationResponse);
+  rpc DeletePlacementNote(PlacementNoteDeleteRequest) returns (PlacementNoteMutationResponse);
+
+  rpc ListBookmarks(BookmarkListRequest) returns (BookmarkListResponse);
+  rpc CreateBookmark(BookmarkCreateRequest) returns (BookmarkMutationResponse);
+  rpc UpdateBookmark(BookmarkUpdateRequest) returns (BookmarkMutationResponse);
+  rpc DeleteBookmark(BookmarkDeleteRequest) returns (BookmarkMutationResponse);
+
+  rpc IntakePendingVendor(IntakePendingVendorRequest) returns (IntakePendingVendorResponse);
+}
