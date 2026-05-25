@@ -38,6 +38,7 @@ tonic = "0.12"
 tonic-build = "0.12"
 tonic-web = "0.12"
 tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.11", features = ["v4", "serde"] }

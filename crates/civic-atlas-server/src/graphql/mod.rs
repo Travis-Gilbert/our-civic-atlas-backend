@@ -23,7 +23,9 @@ pub mod search;
 
 use async_graphql::{EmptySubscription, Schema};
 use async_graphql_axum::GraphQL;
-use axum::Router;
+use axum::{http::HeaderValue, Router};
+use std::env;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::AtlasState;
 use civic_research::MutationRoot;
@@ -48,11 +50,49 @@ pub fn build_schema(state: AtlasState) -> CivicAtlasSchema {
 /// rather than a stateful handler. The schema clones cheaply because its
 /// inner Arc is cheap to clone per request.
 ///
+/// CorsLayer is applied so the browser-side Civic Atlas frontend at
+/// http://localhost:3000 (dev) or its production origin can post
+/// GraphQL operations directly. Configure allowed origins via the
+/// CIVIC_ATLAS_GRAPHQL_ALLOWED_ORIGINS env var (comma-separated list);
+/// the default permits any origin in dev mode for ergonomic local
+/// iteration. Production deployments MUST set the explicit allowlist.
+///
 /// GraphiQL playground is not mounted here: enabling it requires the
 /// `graphiql` feature which pulls handlebars as a heavyweight dep. For
 /// ad-hoc exploration use curl, the urql codegen output, or a desktop
 /// GraphQL client pointed at /graphql.
 pub fn graphql_router(state: AtlasState) -> Router {
     let schema = build_schema(state);
-    Router::new().route_service("/graphql", GraphQL::new(schema))
+    Router::new()
+        .route_service("/graphql", GraphQL::new(schema))
+        .layer(cors_layer())
+}
+
+fn cors_layer() -> CorsLayer {
+    let allowed = env::var("CIVIC_ATLAS_GRAPHQL_ALLOWED_ORIGINS").ok();
+    let mut layer = CorsLayer::new()
+        .allow_methods([axum::http::Method::POST, axum::http::Method::OPTIONS])
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+        ]);
+    match allowed {
+        Some(list) if !list.trim().is_empty() => {
+            let origins: Vec<HeaderValue> = list
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| HeaderValue::from_str(s).ok())
+                .collect();
+            if !origins.is_empty() {
+                layer = layer.allow_origin(origins);
+            }
+        }
+        _ => {
+            // Dev default: permissive. Production MUST set
+            // CIVIC_ATLAS_GRAPHQL_ALLOWED_ORIGINS to lock this down.
+            layer = layer.allow_origin(Any);
+        }
+    }
+    layer
 }
