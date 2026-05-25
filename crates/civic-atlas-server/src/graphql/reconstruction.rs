@@ -25,15 +25,25 @@ use tonic::Request;
 use crate::reconstruction::ReconstructionGrpcService;
 use crate::AtlasState;
 
-/// Minimum-viable HistoricalReconstruction surface for this commit.
-/// Fields will expand to match the sidecar contract in follow-up commits.
-#[derive(SimpleObject)]
+/// HistoricalReconstruction surface. Field set matches what frontend
+/// queries fetch today (atelier-dossier + civic-research). Expansion
+/// follow-ups: footprint (typed nested struct), heightMeters,
+/// bearingDegrees, per-part confidences, roofForm, geometryUrl, sources.
+#[derive(SimpleObject, Default, Clone)]
 pub struct HistoricalReconstruction {
     pub id: String,
     pub civic_object_id: String,
     pub name: String,
     pub description: String,
     pub confidence: f64,
+    /// [longitude, latitude] tuple serialized as a JSON array, matching
+    /// the sidecar's LatLng scalar. None when the spec carries no
+    /// centroid (rare; civic_atlas seeds geometry via PostGIS).
+    pub position: Option<async_graphql::Json<[f64; 2]>>,
+    /// ISO 8601 timestamp marking when this building's lifespan began.
+    pub time_start: Option<String>,
+    /// ISO 8601 timestamp marking when this building's lifespan ended.
+    pub time_end: Option<String>,
 }
 
 /// Minimum-viable ReconstructionDossier surface for this commit.
@@ -98,7 +108,28 @@ fn reconstruction_from_spec(spec: &ReconstructionSpec) -> HistoricalReconstructi
             .cloned()
             .unwrap_or_default(),
         confidence: overall_confidence(spec),
+        // Position is sourced from PostGIS geometry on the civic_object
+        // row, not from the spec proto. Future commit joins through
+        // civic_objects → ST_Centroid() to populate this. Until then,
+        // None is the honest answer.
+        position: None,
+        // Time range maps from spec.t_start_ms / t_end_ms (epoch
+        // milliseconds) into ISO 8601 strings when set.
+        time_start: spec.t_start_ms.map(ms_to_iso8601),
+        time_end: spec.t_end_ms.map(ms_to_iso8601),
     }
+}
+
+/// Convert a Unix epoch milliseconds value into an ISO 8601 timestamp
+/// (UTC). Used for `time_start` / `time_end` on the GraphQL
+/// HistoricalReconstruction. Out-of-range values fall back to an empty
+/// string so the resolver never panics on bad data.
+fn ms_to_iso8601(ms: i64) -> String {
+    let secs = ms / 1_000;
+    let nanos = ((ms % 1_000).abs() as u32) * 1_000_000;
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default()
 }
 
 /// Mean of per-part confidences across mass, primary facade, roof, and

@@ -11,6 +11,7 @@ async-graphql.workspace = true
 async-graphql-axum.workspace = true
 axum.workspace = true
 base64.workspace = true
+chrono.workspace = true
 civic-atlas-types = { path = "../civic-atlas-types" }
 prost.workspace = true
 serde.workspace = true

@@ -16,27 +16,29 @@
 //! on Axum (never in the frontend or a Node sidecar), and capability
 //! growth happens as new schema fields whose resolvers run here.
 
+pub mod civic_research;
 pub mod query;
 pub mod reconstruction;
+pub mod search;
 
-use async_graphql::{EmptyMutation, EmptySubscription, Schema};
+use async_graphql::{EmptySubscription, Schema};
 use async_graphql_axum::GraphQL;
 use axum::Router;
 
 use crate::AtlasState;
+use civic_research::MutationRoot;
 use query::QueryRoot;
 
 /// The composed GraphQL schema served from this process.
 ///
-/// EmptyMutation and EmptySubscription are placeholders until civicResearch
-/// (and other write paths) port across. Replace them when the first
-/// mutation resolver lands.
-pub type CivicAtlasSchema = Schema<QueryRoot, EmptyMutation, EmptySubscription>;
+/// EmptySubscription is a placeholder until streaming surfaces port
+/// across (engine job progress, civic research as it resolves).
+pub type CivicAtlasSchema = Schema<QueryRoot, MutationRoot, EmptySubscription>;
 
 /// Construct the GraphQL schema with the AtlasState available to every
 /// resolver via async-graphql's typed context.
 pub fn build_schema(state: AtlasState) -> CivicAtlasSchema {
-    Schema::build(QueryRoot::default(), EmptyMutation, EmptySubscription)
+    Schema::build(QueryRoot::default(), MutationRoot, EmptySubscription)
         .data(state)
         .finish()
 }
