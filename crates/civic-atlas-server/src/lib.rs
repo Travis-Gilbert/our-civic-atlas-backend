@@ -2,6 +2,7 @@ pub mod corrections;
 pub mod event_planner;
 pub mod event_planner_auth;
 pub mod fixture;
+pub mod graphql;
 pub mod reconstruction;
 pub mod tenant_db;
 pub mod validation;
@@ -707,6 +708,11 @@ struct GetViewportAtTimeJsonResponse {
 }
 
 pub fn http_router(state: AtlasState) -> Router {
+    // GraphQL surface ships on its own state (the composed schema), so
+    // it lives as a sibling Router and is merged onto the JSON shim
+    // router below. Both end up under the same Axum HTTP listener.
+    let graphql = crate::graphql::graphql_router(state.clone());
+
     Router::new()
         .route("/healthz", get(healthz))
         .route(
@@ -718,6 +724,7 @@ pub fn http_router(state: AtlasState) -> Router {
             axum::routing::post(get_viewport_at_time_json),
         )
         .with_state(state)
+        .merge(graphql)
 }
 
 async fn healthz() -> Json<Value> {

@@ -19,6 +19,8 @@ license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1.0"
+async-graphql = { version = "7.0", default-features = false, features = ["chrono", "uuid"] }
+async-graphql-axum = "7.0"
 async-trait = "0.1"
 axum = "0.7"
 base64 = "0.22"
