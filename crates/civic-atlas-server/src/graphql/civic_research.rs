@@ -86,6 +86,15 @@ pub struct ResearchArtifactPromotionInput {
     pub captured_at: Option<DateTime<Utc>>,
     /// JSON object persisted on artifacts.payload_jsonb.
     pub payload: Option<async_graphql::Json<serde_json::Value>>,
+    /// Which reconstruction claim(s) this source helps: footprint,
+    /// facade, ground_floor_use, date, contradiction, or other.
+    pub source_use_tags: Option<Vec<String>>,
+    /// Short human review note describing why this source was saved.
+    pub source_use_note: Option<String>,
+    /// Review state for the saved source. Defaults to
+    /// accepted_for_reconstruction, which means durable input for the
+    /// reconstruction engine, not public claim publication.
+    pub review_state: Option<String>,
     /// UUID or parcel_key. Prefer parcel_key for resident research results.
     pub parcel_ref: Option<String>,
     /// Optional building UUID for already-resolved backend objects.
@@ -110,6 +119,21 @@ pub struct ResearchArtifactPromotionPayload {
     pub artifact_key: String,
     pub status: String,
 }
+
+const DEFAULT_PROMOTION_REVIEW_STATE: &str = "accepted_for_reconstruction";
+const ALLOWED_PROMOTION_REVIEW_STATES: &[&str] = &[
+    "accepted_for_reconstruction",
+    "pending_review",
+    "rejected_for_reconstruction",
+];
+const ALLOWED_SOURCE_USE_TAGS: &[&str] = &[
+    "footprint",
+    "facade",
+    "ground_floor_use",
+    "date",
+    "contradiction",
+    "other",
+];
 
 fn default_tenant() -> String {
     std::env::var("CIVIC_ATLAS_DEFAULT_TENANT").unwrap_or_else(|_| "flint".to_string())
@@ -141,6 +165,65 @@ fn optional_trimmed(value: Option<&str>) -> Option<String> {
 
 fn optional_trimmed_string(value: &Option<String>) -> String {
     optional_trimmed(value.as_deref()).unwrap_or_default()
+}
+
+fn normalized_token(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch == '-' || ch == ' ' {
+                '_'
+            } else {
+                ch.to_ascii_lowercase()
+            }
+        })
+        .collect()
+}
+
+fn validate_allowed_token(
+    field_name: &str,
+    raw: &str,
+    allowed: &[&str],
+) -> async_graphql::Result<String> {
+    let normalized = normalized_token(raw);
+    if normalized.is_empty() {
+        return Err(async_graphql::Error::new(format!(
+            "promoteResearchArtifact: `{field_name}` must not contain an empty value.",
+        )));
+    }
+    if allowed.contains(&normalized.as_str()) {
+        Ok(normalized)
+    } else {
+        Err(async_graphql::Error::new(format!(
+            "promoteResearchArtifact: `{field_name}` value `{raw}` is not supported. Allowed values: {}.",
+            allowed.join(", ")
+        )))
+    }
+}
+
+fn normalized_review_state(
+    input: &ResearchArtifactPromotionInput,
+) -> async_graphql::Result<String> {
+    match optional_trimmed(input.review_state.as_deref()) {
+        Some(value) => {
+            validate_allowed_token("reviewState", &value, ALLOWED_PROMOTION_REVIEW_STATES)
+        }
+        None => Ok(DEFAULT_PROMOTION_REVIEW_STATE.to_string()),
+    }
+}
+
+fn normalized_source_use_tags(
+    input: &ResearchArtifactPromotionInput,
+) -> async_graphql::Result<Vec<String>> {
+    let mut normalized_tags = Vec::new();
+    for raw in input.source_use_tags.as_deref().unwrap_or_default() {
+        let tag = validate_allowed_token("sourceUseTags", raw, ALLOWED_SOURCE_USE_TAGS)?;
+        if !normalized_tags.iter().any(|seen| seen == &tag) {
+            normalized_tags.push(tag);
+        }
+    }
+    Ok(normalized_tags)
 }
 
 fn has_artifact_anchor(input: &ResearchArtifactPromotionInput) -> bool {
@@ -223,6 +306,20 @@ fn insert_optional_metadata(map: &mut Map<String, Value>, key: &str, value: Opti
     }
 }
 
+fn metadata_object_mut<'a>(
+    map: &'a mut Map<String, Value>,
+    field_name: &str,
+) -> async_graphql::Result<&'a mut Map<String, Value>> {
+    map.entry("metadata".to_string())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| {
+            async_graphql::Error::new(format!(
+                "promoteResearchArtifact: `{field_name}.metadata` must be a JSON object.",
+            ))
+        })
+}
+
 fn promotion_json_object(
     value: &Option<async_graphql::Json<serde_json::Value>>,
     field_name: &str,
@@ -230,12 +327,44 @@ fn promotion_json_object(
     artifact_key: &str,
 ) -> async_graphql::Result<String> {
     let mut map = json_object_map(value, field_name)?;
+    let review_state = normalized_review_state(input)?;
+    let source_use_tags = normalized_source_use_tags(input)?;
+    let source_use_note = optional_trimmed(input.source_use_note.as_deref());
+
     map.entry("promotionKind".to_string())
         .or_insert_with(|| Value::String("civicResearch".to_string()));
     map.entry("artifactKey".to_string())
         .or_insert_with(|| Value::String(artifact_key.to_string()));
+    map.entry("reviewState".to_string())
+        .or_insert_with(|| Value::String(review_state.clone()));
+    if !source_use_tags.is_empty() && !map.contains_key("sourceUseTags") {
+        map.insert(
+            "sourceUseTags".to_string(),
+            Value::Array(
+                source_use_tags
+                    .iter()
+                    .map(|tag| Value::String(tag.clone()))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(note) = source_use_note.as_deref() {
+        insert_optional_metadata(&mut map, "sourceUseNote", Some(note));
+    }
     insert_optional_metadata(&mut map, "runId", input.run_id.as_deref());
     insert_optional_metadata(&mut map, "sourceId", input.source_id.as_deref());
+
+    let metadata = metadata_object_mut(&mut map, field_name)?;
+    insert_optional_metadata(metadata, "reviewState", Some(&review_state));
+    if !source_use_tags.is_empty() {
+        insert_optional_metadata(metadata, "sourceUseTags", Some(&source_use_tags.join(",")));
+    }
+    if let Some(note) = source_use_note.as_deref() {
+        insert_optional_metadata(metadata, "sourceUseNote", Some(note));
+    }
+    insert_optional_metadata(metadata, "runId", input.run_id.as_deref());
+    insert_optional_metadata(metadata, "sourceId", input.source_id.as_deref());
+
     Ok(Value::Object(map).to_string())
 }
 
@@ -941,6 +1070,9 @@ mod tests {
             citation: Some("Flint city directory, 1925".to_string()),
             captured_at: None,
             payload: None,
+            source_use_tags: None,
+            source_use_note: None,
+            review_state: None,
             parcel_ref: Some("carriage-town:3".to_string()),
             building_id: None,
             building_part_id: None,
@@ -992,10 +1124,61 @@ mod tests {
         assert_eq!(value["promotionKind"], "civicResearch");
         assert_eq!(value["runId"], "run:carriage-town");
         assert_eq!(value["sourceId"], "directory:1925:storefront");
+        assert_eq!(value["reviewState"], "accepted_for_reconstruction");
+        assert_eq!(
+            value["metadata"]["reviewState"],
+            "accepted_for_reconstruction"
+        );
+        assert_eq!(value["metadata"]["runId"], "run:carriage-town");
     }
 
     #[test]
     fn promotion_anchor_accepts_parcel_ref() {
         assert!(has_artifact_anchor(&promotion_input()));
+    }
+
+    #[test]
+    fn promotion_payload_persists_source_use_and_review_metadata() {
+        let mut input = promotion_input();
+        input.source_use_tags = Some(vec![
+            "facade".to_string(),
+            "ground-floor-use".to_string(),
+            "date".to_string(),
+            "date".to_string(),
+        ]);
+        input.source_use_note = Some("Directory row supports storefront use.".to_string());
+        input.review_state = Some("accepted-for-reconstruction".to_string());
+
+        let raw = promotion_json_object(&input.payload, "payload", &input, "artifact:1").unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(value["reviewState"], "accepted_for_reconstruction");
+        assert_eq!(
+            value["sourceUseTags"],
+            serde_json::json!(["facade", "ground_floor_use", "date"])
+        );
+        assert_eq!(
+            value["sourceUseNote"],
+            "Directory row supports storefront use."
+        );
+        assert_eq!(
+            value["metadata"]["sourceUseTags"],
+            "facade,ground_floor_use,date"
+        );
+        assert_eq!(
+            value["metadata"]["sourceUseNote"],
+            "Directory row supports storefront use."
+        );
+    }
+
+    #[test]
+    fn promotion_payload_rejects_unknown_source_use_tags() {
+        let mut input = promotion_input();
+        input.source_use_tags = Some(vec!["vibes".to_string()]);
+
+        let error =
+            promotion_json_object(&input.payload, "payload", &input, "artifact:1").unwrap_err();
+        assert!(error.message.contains("sourceUseTags"));
+        assert!(error.message.contains("vibes"));
     }
 }
