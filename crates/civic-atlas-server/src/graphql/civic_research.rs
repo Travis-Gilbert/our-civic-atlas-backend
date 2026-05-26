@@ -18,10 +18,13 @@
 //! priorKnowledge + newEvidence + gapClosures.
 
 use async_graphql::{Context, InputObject, Object, SimpleObject};
+use chrono::{DateTime, Utc};
 use civic_atlas_types::civic_atlas::v1::{
-    civic_atlas_service_server::CivicAtlasService, CivicResearchRequest, TenantContext,
+    civic_atlas_service_server::CivicAtlasService, CivicResearchRequest, PersistArtifactRequest,
+    TenantContext,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use tonic::Request;
 
 use crate::graphql::reconstruction::{HistoricalReconstruction, ReconstructionFootprint};
@@ -61,6 +64,53 @@ pub struct CivicResearchPayload {
     pub results: SearchResults,
 }
 
+#[derive(InputObject)]
+pub struct ResearchArtifactPromotionInput {
+    /// Optional stable artifact key. When omitted the resolver derives one
+    /// from run/source/title so repeat promotions upsert the same artifact.
+    pub artifact_key: Option<String>,
+    /// Harness run id returned by civicResearch.
+    pub run_id: Option<String>,
+    /// Source/result id selected from civicResearch results.
+    pub source_id: Option<String>,
+    /// Source family for reconstruction filtering (directory, archival_photo,
+    /// map, text, etc.).
+    pub source_type: String,
+    /// Resident-readable source title.
+    pub title: String,
+    /// Canonical source URL when one exists.
+    pub uri: Option<String>,
+    /// Short citation or holding note.
+    pub citation: Option<String>,
+    /// Capture/publication time for the source itself.
+    pub captured_at: Option<DateTime<Utc>>,
+    /// JSON object persisted on artifacts.payload_jsonb.
+    pub payload: Option<async_graphql::Json<serde_json::Value>>,
+    /// UUID or parcel_key. Prefer parcel_key for resident research results.
+    pub parcel_ref: Option<String>,
+    /// Optional building UUID for already-resolved backend objects.
+    pub building_id: Option<String>,
+    /// Optional building-part UUID for already-resolved backend objects.
+    pub building_part_id: Option<String>,
+    /// Anchor family; defaults to `research`.
+    pub anchor_kind: Option<String>,
+    /// Optional WKT geometry anchor.
+    pub anchor_geometry_wkt: Option<String>,
+    /// Optional start of the source's applicability window.
+    pub anchor_time_start: Option<DateTime<Utc>>,
+    /// Optional end of the source's applicability window.
+    pub anchor_time_end: Option<DateTime<Utc>>,
+    /// JSON object persisted on artifact_anchors.payload_jsonb.
+    pub anchor_payload: Option<async_graphql::Json<serde_json::Value>>,
+}
+
+#[derive(SimpleObject)]
+pub struct ResearchArtifactPromotionPayload {
+    pub artifact_id: String,
+    pub artifact_key: String,
+    pub status: String,
+}
+
 fn default_tenant() -> String {
     std::env::var("CIVIC_ATLAS_DEFAULT_TENANT").unwrap_or_else(|_| "flint".to_string())
 }
@@ -70,6 +120,127 @@ fn json_to_string(value: Option<async_graphql::Json<serde_json::Value>>) -> Stri
         Some(async_graphql::Json(v)) => v.to_string(),
         None => String::new(),
     }
+}
+
+fn required_trimmed(value: &str, field_name: &str) -> async_graphql::Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(async_graphql::Error::new(format!(
+            "promoteResearchArtifact: `{field_name}` must be a non-empty string.",
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn optional_trimmed(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
+fn optional_trimmed_string(value: &Option<String>) -> String {
+    optional_trimmed(value.as_deref()).unwrap_or_default()
+}
+
+fn has_artifact_anchor(input: &ResearchArtifactPromotionInput) -> bool {
+    optional_trimmed(input.parcel_ref.as_deref()).is_some()
+        || optional_trimmed(input.building_id.as_deref()).is_some()
+        || optional_trimmed(input.building_part_id.as_deref()).is_some()
+        || optional_trimmed(input.anchor_geometry_wkt.as_deref()).is_some()
+}
+
+fn key_piece(value: Option<&str>) -> String {
+    let piece: String = value
+        .unwrap_or("source")
+        .chars()
+        .filter_map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                Some(ch.to_ascii_lowercase())
+            } else if ch == ':' || ch == '-' || ch == '_' {
+                Some('-')
+            } else {
+                None
+            }
+        })
+        .take(48)
+        .collect();
+    let trimmed = piece.trim_matches('-');
+    if trimmed.is_empty() {
+        "source".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn artifact_key_for(
+    input: &ResearchArtifactPromotionInput,
+    source_type: &str,
+    title: &str,
+) -> String {
+    if let Some(key) = optional_trimmed(input.artifact_key.as_deref()) {
+        return key;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(optional_trimmed(input.run_id.as_deref()).unwrap_or_default());
+    hasher.update("|");
+    hasher.update(optional_trimmed(input.source_id.as_deref()).unwrap_or_default());
+    hasher.update("|");
+    hasher.update(optional_trimmed(input.uri.as_deref()).unwrap_or_default());
+    hasher.update("|");
+    hasher.update(source_type);
+    hasher.update("|");
+    hasher.update(title);
+    let digest = format!("{:x}", hasher.finalize());
+    format!(
+        "research:{}:{}",
+        key_piece(input.source_id.as_deref().or(input.run_id.as_deref())),
+        &digest[..16],
+    )
+}
+
+fn json_object_map(
+    value: &Option<async_graphql::Json<serde_json::Value>>,
+    field_name: &str,
+) -> async_graphql::Result<Map<String, Value>> {
+    match value {
+        Some(async_graphql::Json(value)) => value.as_object().cloned().ok_or_else(|| {
+            async_graphql::Error::new(format!(
+                "promoteResearchArtifact: `{field_name}` must be a JSON object.",
+            ))
+        }),
+        None => Ok(Map::new()),
+    }
+}
+
+fn insert_optional_metadata(map: &mut Map<String, Value>, key: &str, value: Option<&str>) {
+    if map.contains_key(key) {
+        return;
+    }
+    if let Some(value) = optional_trimmed(value) {
+        map.insert(key.to_string(), Value::String(value));
+    }
+}
+
+fn promotion_json_object(
+    value: &Option<async_graphql::Json<serde_json::Value>>,
+    field_name: &str,
+    input: &ResearchArtifactPromotionInput,
+    artifact_key: &str,
+) -> async_graphql::Result<String> {
+    let mut map = json_object_map(value, field_name)?;
+    map.entry("promotionKind".to_string())
+        .or_insert_with(|| Value::String("civicResearch".to_string()));
+    map.entry("artifactKey".to_string())
+        .or_insert_with(|| Value::String(artifact_key.to_string()));
+    insert_optional_metadata(&mut map, "runId", input.run_id.as_deref());
+    insert_optional_metadata(&mut map, "sourceId", input.source_id.as_deref());
+    Ok(Value::Object(map).to_string())
+}
+
+fn millis(value: Option<DateTime<Utc>>) -> Option<i64> {
+    value.map(|dt| dt.timestamp_millis())
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +749,79 @@ pub async fn resolve_civic_research(
     })
 }
 
+pub async fn resolve_promote_research_artifact(
+    state: &AtlasState,
+    input: ResearchArtifactPromotionInput,
+) -> async_graphql::Result<ResearchArtifactPromotionPayload> {
+    let source_type = required_trimmed(&input.source_type, "sourceType")?;
+    let title = required_trimmed(&input.title, "title")?;
+    if !has_artifact_anchor(&input) {
+        return Err(async_graphql::Error::new(
+            "promoteResearchArtifact: provide parcelRef, buildingId, buildingPartId, or anchorGeometryWkt.",
+        ));
+    }
+
+    let artifact_key = artifact_key_for(&input, &source_type, &title);
+    let payload_json = promotion_json_object(&input.payload, "payload", &input, &artifact_key)?;
+    let anchor_payload_json = promotion_json_object(
+        &input.anchor_payload,
+        "anchorPayload",
+        &input,
+        &artifact_key,
+    )?;
+
+    let tenant_id = default_tenant();
+    let service = CivicAtlasGrpcService::new(state.clone());
+
+    let mut request = Request::new(PersistArtifactRequest {
+        tenant_context: Some(TenantContext {
+            tenant_id: tenant_id.clone(),
+            atlas_node_id: format!("atlas:{tenant_id}"),
+            metadata: Default::default(),
+        }),
+        artifact_key: artifact_key.clone(),
+        source_type,
+        title,
+        uri: optional_trimmed_string(&input.uri),
+        citation: optional_trimmed_string(&input.citation),
+        captured_at_ms: millis(input.captured_at),
+        payload_json,
+        parcel_ref: optional_trimmed_string(&input.parcel_ref),
+        building_id: optional_trimmed_string(&input.building_id),
+        building_part_id: optional_trimmed_string(&input.building_part_id),
+        anchor_kind: optional_trimmed(input.anchor_kind.as_deref())
+            .unwrap_or_else(|| "research".to_string()),
+        anchor_geometry_wkt: optional_trimmed_string(&input.anchor_geometry_wkt),
+        anchor_time_start_ms: millis(input.anchor_time_start),
+        anchor_time_end_ms: millis(input.anchor_time_end),
+        anchor_payload_json,
+    });
+    request.metadata_mut().insert(
+        "x-atlas-tenant",
+        tenant_id
+            .parse()
+            .map_err(|err| async_graphql::Error::new(format!("invalid tenant id: {err}")))?,
+    );
+
+    let response = service
+        .persist_artifact(request)
+        .await
+        .map_err(|status| {
+            async_graphql::Error::new(format!(
+                "promoteResearchArtifact failed: {} ({})",
+                status.message(),
+                status.code()
+            ))
+        })?
+        .into_inner();
+
+    Ok(ResearchArtifactPromotionPayload {
+        artifact_id: response.artifact_id,
+        artifact_key,
+        status: response.status,
+    })
+}
+
 pub struct MutationRoot;
 
 #[Object]
@@ -596,6 +840,20 @@ impl MutationRoot {
             .data::<AtlasState>()
             .map_err(|_| async_graphql::Error::new("AtlasState missing from GraphQL context"))?;
         resolve_civic_research(state, input).await
+    }
+
+    /// Promote a selected civicResearch source into the tenant-scoped
+    /// artifact tables so future reconstruction runs can consume it as
+    /// source-backed evidence.
+    async fn promote_research_artifact(
+        &self,
+        ctx: &Context<'_>,
+        input: ResearchArtifactPromotionInput,
+    ) -> async_graphql::Result<ResearchArtifactPromotionPayload> {
+        let state = ctx
+            .data::<AtlasState>()
+            .map_err(|_| async_graphql::Error::new("AtlasState missing from GraphQL context"))?;
+        resolve_promote_research_artifact(state, input).await
     }
 }
 
@@ -670,5 +928,74 @@ mod tests {
         let signal = &results.signals[0];
         assert_eq!(signal.signal_kind, "research_status");
         assert_eq!(signal.title, "Research sources are not connected yet");
+    }
+
+    fn promotion_input() -> ResearchArtifactPromotionInput {
+        ResearchArtifactPromotionInput {
+            artifact_key: None,
+            run_id: Some("run:carriage-town".to_string()),
+            source_id: Some("directory:1925:storefront".to_string()),
+            source_type: "directory".to_string(),
+            title: "1925 city directory storefront row".to_string(),
+            uri: Some("https://example.org/directory".to_string()),
+            citation: Some("Flint city directory, 1925".to_string()),
+            captured_at: None,
+            payload: None,
+            parcel_ref: Some("carriage-town:3".to_string()),
+            building_id: None,
+            building_part_id: None,
+            anchor_kind: None,
+            anchor_geometry_wkt: None,
+            anchor_time_start: None,
+            anchor_time_end: None,
+            anchor_payload: None,
+        }
+    }
+
+    #[test]
+    fn generated_artifact_key_is_stable_for_same_research_source() {
+        let input = promotion_input();
+        let first = artifact_key_for(&input, "directory", "1925 city directory storefront row");
+        let second = artifact_key_for(&input, "directory", "1925 city directory storefront row");
+        assert_eq!(first, second);
+        assert!(first.starts_with("research:directory-1925-storefront:"));
+    }
+
+    #[test]
+    fn explicit_artifact_key_wins() {
+        let mut input = promotion_input();
+        input.artifact_key = Some("artifact:manual-directory-1925".to_string());
+        assert_eq!(
+            artifact_key_for(&input, "directory", "1925 city directory storefront row"),
+            "artifact:manual-directory-1925"
+        );
+    }
+
+    #[test]
+    fn promotion_payload_requires_json_object() {
+        let mut input = promotion_input();
+        input.payload = Some(async_graphql::Json(serde_json::json!(["not", "object"])));
+        let error =
+            promotion_json_object(&input.payload, "payload", &input, "artifact:1").unwrap_err();
+        assert!(error.message.contains("must be a JSON object"));
+    }
+
+    #[test]
+    fn promotion_payload_preserves_claims_and_adds_research_metadata() {
+        let mut input = promotion_input();
+        input.payload = Some(async_graphql::Json(serde_json::json!({
+            "claim": "storefront active in 1925"
+        })));
+        let raw = promotion_json_object(&input.payload, "payload", &input, "artifact:1").unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["claim"], "storefront active in 1925");
+        assert_eq!(value["promotionKind"], "civicResearch");
+        assert_eq!(value["runId"], "run:carriage-town");
+        assert_eq!(value["sourceId"], "directory:1925:storefront");
+    }
+
+    #[test]
+    fn promotion_anchor_accepts_parcel_ref() {
+        assert!(has_artifact_anchor(&promotion_input()));
     }
 }
