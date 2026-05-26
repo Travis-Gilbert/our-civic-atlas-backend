@@ -19,10 +19,18 @@
 use std::env;
 
 use async_graphql::{Context, InputObject, Object, SimpleObject};
+use chrono::NaiveDate;
+use civic_atlas_reconstruction_engine::{
+    run_full_pipeline, BlockCoherentPriorModel, GeneratedAsset as EngineGeneratedAsset,
+    MergeConflict as EngineMergeConflict, PostgisRepository,
+    ReconstructionRequest as EngineReconstructionRequest, SceneFoundryManifestGenerator,
+    ZeroEmbeddingProvider,
+};
 use civic_atlas_types::civic_atlas::v1::{
     reconstruction_service_server::ReconstructionService, GetReconstructionSpecRequest,
-    ListReconstructionSpecsRequest, PartProvenance, ReconstructionSource as ProtoSource,
-    ReconstructionSourceType, ReconstructionSpec, TenantContext,
+    ListReconstructionSpecsRequest, PartProvenance, ReconstructionAsset,
+    ReconstructionSource as ProtoSource, ReconstructionSourceType, ReconstructionSpec,
+    TenantContext, TimeSlice,
 };
 use serde_json::json;
 use tonic::Request;
@@ -300,6 +308,18 @@ fn target_node_id(reconstruction_id: &str, part: &str) -> String {
     format!("reconstruction-node:{reconstruction_id}:{part}")
 }
 
+fn year_start_ms(year: i32) -> async_graphql::Result<i64> {
+    if !(1700..=2100).contains(&year) {
+        return Err(async_graphql::Error::new(
+            "year must be between 1700 and 2100",
+        ));
+    }
+    NaiveDate::from_ymd_opt(year, 1, 1)
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|date_time| date_time.and_utc().timestamp_millis())
+        .ok_or_else(|| async_graphql::Error::new("invalid reconstruction year"))
+}
+
 fn roof_form_from(value: &str) -> Option<String> {
     let lower = value.to_ascii_lowercase();
     if lower.contains("hip") {
@@ -460,7 +480,10 @@ fn evidence_from_spec(spec: &ReconstructionSpec) -> EvidenceBundle {
     let mass_prov = spec.mass.as_ref().and_then(|m| m.provenance.as_ref());
     let facade_prov = spec.facades.first().and_then(|f| f.provenance.as_ref());
     let roof_prov = spec.roof.as_ref().and_then(|r| r.provenance.as_ref());
-    let ground_prov = spec.ground_floor.as_ref().and_then(|g| g.provenance.as_ref());
+    let ground_prov = spec
+        .ground_floor
+        .as_ref()
+        .and_then(|g| g.provenance.as_ref());
 
     let parts: Vec<(&str, &str, Option<&PartProvenance>)> = vec![
         ("mass", "SANBORN", mass_prov),
@@ -503,7 +526,10 @@ fn conflicts_from_spec(spec: &ReconstructionSpec) -> Vec<MergeConflict> {
     let mass_prov = spec.mass.as_ref().and_then(|m| m.provenance.as_ref());
     let facade_prov = spec.facades.first().and_then(|f| f.provenance.as_ref());
     let roof_prov = spec.roof.as_ref().and_then(|r| r.provenance.as_ref());
-    let ground_prov = spec.ground_floor.as_ref().and_then(|g| g.provenance.as_ref());
+    let ground_prov = spec
+        .ground_floor
+        .as_ref()
+        .and_then(|g| g.provenance.as_ref());
 
     let parts: Vec<(&str, &str, Option<&PartProvenance>)> = vec![
         ("mass", "Shape and size", mass_prov),
@@ -526,6 +552,87 @@ fn conflicts_from_spec(spec: &ReconstructionSpec) -> Vec<MergeConflict> {
             resolution_explanation: "Backend marked this part as having a source conflict."
                 .to_string(),
             resolution_threshold: 0.7,
+        })
+        .collect()
+}
+
+fn conflict_part_from_field_path(field_path: &str) -> &'static str {
+    let lower = field_path.to_ascii_lowercase();
+    if lower.contains("facade") {
+        "facade"
+    } else if lower.contains("roof") {
+        "roof"
+    } else if lower.contains("ground") {
+        "ground_floor"
+    } else {
+        "mass"
+    }
+}
+
+fn synthetic_conflict_source(id: &str, name: &str) -> Source {
+    Source {
+        id: id.to_string(),
+        name: name.to_string(),
+        homepage_url: None,
+        source_type: "MODEL".to_string(),
+        public_use_terms: None,
+        trust_tier: "MEDIUM".to_string(),
+        last_checked: None,
+        known_limits: Vec::new(),
+        contains_personal_data: false,
+    }
+}
+
+fn conflicts_from_engine(spec_id: &str, conflicts: &[EngineMergeConflict]) -> Vec<MergeConflict> {
+    conflicts
+        .iter()
+        .enumerate()
+        .map(|(idx, conflict)| {
+            let part = conflict_part_from_field_path(&conflict.field_path);
+            MergeConflict {
+                id: format!("merge-conflict:{spec_id}:{part}:{idx}"),
+                reconstruction_id: spec_id.to_string(),
+                target_node_id: target_node_id(spec_id, part),
+                field_label: conflict.field_path.clone(),
+                disagreements: vec![
+                    MergeDisagreement {
+                        source: synthetic_conflict_source("engine:direct", "Direct source extraction"),
+                        stated_value: conflict.direct_value.clone(),
+                        confidence: conflict.direct_confidence,
+                        evidence_item_id: format!("evidence:{spec_id}:{part}:direct"),
+                    },
+                    MergeDisagreement {
+                        source: synthetic_conflict_source("engine:prior", "Block prior"),
+                        stated_value: conflict.prior_value.clone(),
+                        confidence: conflict.threshold,
+                        evidence_item_id: format!("evidence:{spec_id}:{part}:prior"),
+                    },
+                ],
+                resolved_value: conflict.direct_value.clone(),
+                resolution_explanation: "The reconstruction engine kept the direct source value because it met the merge threshold.".to_string(),
+                resolution_threshold: conflict.threshold,
+            }
+        })
+        .collect()
+}
+
+fn engine_assets_to_proto(
+    tenant_id: &str,
+    spec_id: &str,
+    spec_version: u32,
+    assets: &[EngineGeneratedAsset],
+) -> Vec<ReconstructionAsset> {
+    assets
+        .iter()
+        .map(|asset| ReconstructionAsset {
+            asset_id: asset.asset_id.clone(),
+            spec_id: spec_id.to_string(),
+            spec_version,
+            tenant_id: tenant_id.to_string(),
+            asset_type: asset.asset_type.clone(),
+            uri: asset.uri.clone(),
+            content_hash: asset.content_hash.clone(),
+            metadata: asset.metadata.clone().into_iter().collect(),
         })
         .collect()
 }
@@ -738,10 +845,120 @@ pub async fn resolve_reconstruction_dossier(
     }))
 }
 
+pub async fn resolve_reconstruction_for(
+    state: &AtlasState,
+    parcel_id: &str,
+    year: i32,
+) -> async_graphql::Result<Option<ReconstructionDossier>> {
+    if parcel_id.trim().is_empty() {
+        return Err(async_graphql::Error::new("parcelId is required"));
+    }
+
+    let pool = state
+        .db_pool()
+        .ok_or_else(|| async_graphql::Error::new("DATABASE_URL is required for reconstructionFor"))?
+        .clone();
+    let tenant_id = default_tenant();
+    let at_ms = year_start_ms(year)?;
+    let tenant_context = TenantContext {
+        tenant_id: tenant_id.clone(),
+        atlas_node_id: format!("atlas:{tenant_id}"),
+        metadata: Default::default(),
+    };
+    let request = EngineReconstructionRequest {
+        tenant_context: tenant_context.clone(),
+        parcel_id: parcel_id.to_string(),
+        time_slice: TimeSlice {
+            at_ms: Some(at_ms),
+            start_ms: None,
+            end_ms: None,
+        },
+        requested_by: "graphql:reconstructionFor".to_string(),
+        auto_approve: false,
+    };
+
+    let repository = PostgisRepository::new(pool);
+    let embeddings = ZeroEmbeddingProvider::default();
+    let prior_model = BlockCoherentPriorModel::default();
+    let asset_generator = SceneFoundryManifestGenerator::default();
+    let output = run_full_pipeline(
+        request,
+        &repository,
+        &embeddings,
+        &prior_model,
+        &asset_generator,
+    )
+    .await
+    .map_err(|err| async_graphql::Error::new(format!("run_full_pipeline failed: {err}")))?;
+
+    let mut spec = output.merged.spec.clone();
+    if spec.assets.is_empty() {
+        spec.assets = engine_assets_to_proto(
+            &tenant_id,
+            &spec.spec_id,
+            spec.spec_version,
+            &output.asset_manifest.assets,
+        );
+    }
+
+    let reconstruction = reconstruction_from_spec(&spec);
+    let evidence = evidence_from_spec(&spec);
+    let mut conflicts = conflicts_from_engine(&spec.spec_id, &output.merged.conflicts);
+    if conflicts.is_empty() {
+        conflicts = conflicts_from_spec(&spec);
+    }
+    let block_subgraph = block_subgraph_for_spec(state, &spec).await?;
+    let node_tree = node_tree_for_reconstruction(&reconstruction.id);
+    let source_word = if evidence.total_count == 1 {
+        "source item"
+    } else {
+        "source items"
+    };
+    let summary = format!(
+        "Live reconstruction pipeline assembled {} {source_word} for {parcel_id} in {year}.",
+        evidence.total_count
+    );
+    let debug = json!({
+        "source": "civic-atlas-reconstruction-engine.run_full_pipeline",
+        "parcelId": parcel_id,
+        "year": year,
+        "specId": spec.spec_id,
+        "assetManifestId": output.asset_manifest.manifest_id,
+        "conflictCount": output.merged.conflicts.len(),
+        "embeddingModel": output.embedded_subgraph.embedding_model,
+        "embeddingModelVersion": output.embedded_subgraph.embedding_model_version,
+        "priorModelVersion": output.prior.model_version,
+    });
+
+    Ok(Some(ReconstructionDossier {
+        reconstruction,
+        evidence,
+        conflicts,
+        block_subgraph,
+        node_tree: async_graphql::Json(node_tree),
+        summary,
+        debug: Some(async_graphql::Json(debug)),
+    }))
+}
+
 pub struct ReconstructionQuery;
 
 #[Object]
 impl ReconstructionQuery {
+    /// Runs the live reconstruction pipeline for a parcel/civic-object id and
+    /// target year. This is the resident-facing atelier entry point.
+    async fn reconstruction_for(
+        &self,
+        ctx: &Context<'_>,
+        parcel_id: String,
+        year: i32,
+    ) -> async_graphql::Result<Option<ReconstructionDossier>> {
+        let state = ctx
+            .data::<AtlasState>()
+            .map_err(|_| async_graphql::Error::new("AtlasState missing from GraphQL context"))?;
+        resolve_reconstruction_for(state, &parcel_id, year).await
+    }
+
     /// One-shot atelier payload. Returns null when the reconstruction
     /// spec is not in PostGIS for the active tenant.
     async fn reconstruction_dossier(

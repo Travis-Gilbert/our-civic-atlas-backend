@@ -288,44 +288,54 @@ pub fn parse_search_results(results_json: &str, query: &str) -> SearchResults {
         })
         .collect();
 
-    let typed_reconstructions: Vec<HistoricalReconstruction> = arr(&parsed, "historicalReconstructions")
-        .iter()
-        .enumerate()
-        .map(|(idx, value)| {
-            let item = obj(value);
-            HistoricalReconstruction {
-                id: first_str(item, &["id"], &format!("reconstruction:{idx}")),
-                civic_object_id: first_str(
-                    item,
-                    &["civicObjectId", "civic_object_id"],
-                    &format!("reconstruction:{idx}"),
-                ),
-                name: first_str(item, &["name", "label"], "Research reconstruction"),
-                description: first_str(item, &["description", "snippet"], ""),
-                position: coordinate_pair(item.get("position")).map(async_graphql::Json),
-                footprint: footprint_from(item.get("footprint")),
-                height_meters: first_number(item, &["heightMeters", "height_m"], 0.0),
-                bearing_degrees: first_number(item, &["bearingDegrees", "bearing_deg"], 0.0),
-                confidence: first_number(item, &["confidence"], 0.0),
-                facade_confidence: first_nullable_number(item, &["facadeConfidence", "facade_confidence"]),
-                roof_confidence: first_nullable_number(item, &["roofConfidence", "roof_confidence"]),
-                ground_floor_confidence: first_nullable_number(
-                    item,
-                    &["groundFloorConfidence", "ground_floor_confidence"],
-                ),
-                roof_form: first_nullable_str(item, &["roofForm", "roof_form"]),
-                time_start: first_nullable_str(item, &["timeStart"]),
-                time_end: first_nullable_str(item, &["timeEnd"]),
-                geometry_url: first_nullable_str(item, &["geometryUrl", "geometry_url"]),
-                geometry_format: first_nullable_str(item, &["geometryFormat", "geometry_format"]),
-                foundry_asset_url: first_nullable_str(
-                    item,
-                    &["foundryAssetUrl", "foundry_asset_url"],
-                ),
-                sources: Vec::new(),
-            }
-        })
-        .collect();
+    let typed_reconstructions: Vec<HistoricalReconstruction> =
+        arr(&parsed, "historicalReconstructions")
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| {
+                let item = obj(value);
+                HistoricalReconstruction {
+                    id: first_str(item, &["id"], &format!("reconstruction:{idx}")),
+                    civic_object_id: first_str(
+                        item,
+                        &["civicObjectId", "civic_object_id"],
+                        &format!("reconstruction:{idx}"),
+                    ),
+                    name: first_str(item, &["name", "label"], "Research reconstruction"),
+                    description: first_str(item, &["description", "snippet"], ""),
+                    position: coordinate_pair(item.get("position")).map(async_graphql::Json),
+                    footprint: footprint_from(item.get("footprint")),
+                    height_meters: first_number(item, &["heightMeters", "height_m"], 0.0),
+                    bearing_degrees: first_number(item, &["bearingDegrees", "bearing_deg"], 0.0),
+                    confidence: first_number(item, &["confidence"], 0.0),
+                    facade_confidence: first_nullable_number(
+                        item,
+                        &["facadeConfidence", "facade_confidence"],
+                    ),
+                    roof_confidence: first_nullable_number(
+                        item,
+                        &["roofConfidence", "roof_confidence"],
+                    ),
+                    ground_floor_confidence: first_nullable_number(
+                        item,
+                        &["groundFloorConfidence", "ground_floor_confidence"],
+                    ),
+                    roof_form: first_nullable_str(item, &["roofForm", "roof_form"]),
+                    time_start: first_nullable_str(item, &["timeStart"]),
+                    time_end: first_nullable_str(item, &["timeEnd"]),
+                    geometry_url: first_nullable_str(item, &["geometryUrl", "geometry_url"]),
+                    geometry_format: first_nullable_str(
+                        item,
+                        &["geometryFormat", "geometry_format"],
+                    ),
+                    foundry_asset_url: first_nullable_str(
+                        item,
+                        &["foundryAssetUrl", "foundry_asset_url"],
+                    ),
+                    sources: Vec::new(),
+                }
+            })
+            .collect();
 
     let typed_sources: Vec<Source> = arr(&parsed, "sources")
         .iter()
@@ -340,7 +350,9 @@ pub fn parse_search_results(results_json: &str, query: &str) -> SearchResults {
                 public_use_terms: first_nullable_str(item, &["publicUseTerms", "public_use_terms"]),
                 trust_tier: first_str(item, &["trustTier"], "reviewable"),
                 last_checked: first_nullable_str(item, &["lastChecked", "last_checked"]),
-                known_limits: string_array(item.get("knownLimits").or_else(|| item.get("known_limits"))),
+                known_limits: string_array(
+                    item.get("knownLimits").or_else(|| item.get("known_limits")),
+                ),
                 contains_personal_data: item
                     .get("containsPersonalData")
                     .or_else(|| item.get("contains_personal_data"))
@@ -432,7 +444,14 @@ pub fn parse_search_results(results_json: &str, query: &str) -> SearchResults {
         .filter(|(_, _, source, url)| !source.is_empty() || !url.is_empty())
         .enumerate()
         .map(|(idx, (id, _signal, source, url))| {
-            let fallback_id = format!("research-source:{}", if id.is_empty() { idx.to_string() } else { id.clone() });
+            let fallback_id = format!(
+                "research-source:{}",
+                if id.is_empty() {
+                    idx.to_string()
+                } else {
+                    id.clone()
+                }
+            );
             Source {
                 id: fallback_id,
                 name: if !url.is_empty() {
@@ -442,7 +461,11 @@ pub fn parse_search_results(results_json: &str, query: &str) -> SearchResults {
                 } else {
                     "Research source".to_string()
                 },
-                homepage_url: if !url.is_empty() { Some(url.clone()) } else { None },
+                homepage_url: if !url.is_empty() {
+                    Some(url.clone())
+                } else {
+                    None
+                },
                 source_type: if !source.is_empty() {
                     source.clone()
                 } else {
@@ -464,7 +487,8 @@ pub fn parse_search_results(results_json: &str, query: &str) -> SearchResults {
     let mut sources: Vec<Source> = typed_sources;
     sources.extend(evidence_sources);
 
-    let derived_total = (places.len() + signals.len() + typed_events.len() + typed_reconstructions.len()) as i64;
+    let derived_total =
+        (places.len() + signals.len() + typed_events.len() + typed_reconstructions.len()) as i64;
     let total_result_count = parsed_obj
         .and_then(|o| o.get("totalResultCount").or_else(|| o.get("totalReturned")))
         .and_then(|v| v.as_i64())
@@ -626,7 +650,10 @@ mod tests {
         }"#;
         let results = parse_search_results(json, "");
         assert_eq!(results.signals.len(), 2);
-        assert!(results.sources.iter().any(|s| s.id.starts_with("research-source:")));
+        assert!(results
+            .sources
+            .iter()
+            .any(|s| s.id.starts_with("research-source:")));
     }
 
     #[test]
