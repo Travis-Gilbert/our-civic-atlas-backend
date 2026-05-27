@@ -9,10 +9,13 @@
 # Run:     docker run -p 8080:8080 -e PORT=8080 civic-atlas-backend
 
 # --- stage 1: build ---------------------------------------------------
-# rust:1.88 because several transitive deps (time, home, icu_*) require
-# rustc >= 1.86/1.88. Workspace's Cargo.toml rust-version declaration
-# is a min-version hint for downstream consumers, not a deps constraint.
-FROM rust:1.88-slim-bookworm AS builder
+# rust:1.89 because async-graphql@7.2.1 (pulled in by the Axum-native
+# GraphQL surface in crates/civic-atlas-server/src/graphql) requires
+# rustc >= 1.89. Earlier transitive deps (time, home, icu_*) needed
+# 1.86/1.88; async-graphql is the current floor. Workspace's
+# Cargo.toml rust-version declaration is a min-version hint for
+# downstream consumers, not a deps constraint.
+FROM rust:1.89-slim-bookworm AS builder
 
 # protoc is needed by tonic-build to compile civic_atlas.proto and
 # friends at build time. The civic-atlas-types build.rs invokes it.
