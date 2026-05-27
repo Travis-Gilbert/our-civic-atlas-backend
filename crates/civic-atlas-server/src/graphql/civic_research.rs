@@ -62,6 +62,45 @@ pub struct CivicResearchPayload {
     /// arrays plus derived signals/sources from priorKnowledge +
     /// newEvidence + gapClosures.
     pub results: SearchResults,
+    /// Unsaved source candidates derived from the run. These are explicitly
+    /// not durable reconstruction evidence until promoted through
+    /// promoteResearchArtifact.
+    pub candidate_sources: Vec<ResearchCandidateSource>,
+}
+
+#[derive(SimpleObject, Clone)]
+pub struct ResearchCandidateSource {
+    /// Stable candidate id scoped to this research result.
+    pub candidate_id: String,
+    /// Research run that surfaced this candidate.
+    pub run_id: String,
+    /// Source/result id selected from the research response.
+    pub source_id: String,
+    /// Resident-readable source title.
+    pub title: String,
+    /// Source family used by reconstruction filtering.
+    pub source_type: String,
+    /// Canonical URL when the research result provided one.
+    pub uri: Option<String>,
+    /// Review/trust tier carried from the source result.
+    pub trust_tier: String,
+    /// Candidate confidence when the upstream result provided one.
+    pub confidence: Option<f64>,
+    /// Lifecycle state. Contract v1 emits only `candidate`.
+    pub status: String,
+    /// Optional parcel/civic-object key from the research scope.
+    pub parcel_ref: Option<String>,
+    /// Optional target year from the research scope.
+    pub year: Option<i32>,
+    /// Stable key for a Civic RustyRed hot-graph node if/when candidates are
+    /// materialized outside PostGIS.
+    pub candidate_graph_key: String,
+    /// Mutation that turns this candidate into canonical PostGIS evidence.
+    pub promotion_mutation: String,
+    /// Suggested source-use tags for the explicit promotion form.
+    pub proposed_use_tags: Vec<String>,
+    /// Machine-readable envelope for cache/projection layers.
+    pub payload: async_graphql::Json<serde_json::Value>,
 }
 
 #[derive(InputObject)]
@@ -73,6 +112,10 @@ pub struct ResearchArtifactPromotionInput {
     pub run_id: Option<String>,
     /// Source/result id selected from civicResearch results.
     pub source_id: Option<String>,
+    /// Optional candidate id returned by civicResearch.candidateSources.
+    /// The resolver records it in payload metadata only; it does not make
+    /// unsaved research durable without this explicit promotion.
+    pub candidate_id: Option<String>,
     /// Source family for reconstruction filtering (directory, archival_photo,
     /// map, text, etc.).
     pub source_type: String,
@@ -270,6 +313,8 @@ fn artifact_key_for(
     hasher.update("|");
     hasher.update(optional_trimmed(input.source_id.as_deref()).unwrap_or_default());
     hasher.update("|");
+    hasher.update(optional_trimmed(input.candidate_id.as_deref()).unwrap_or_default());
+    hasher.update("|");
     hasher.update(optional_trimmed(input.uri.as_deref()).unwrap_or_default());
     hasher.update("|");
     hasher.update(source_type);
@@ -353,6 +398,7 @@ fn promotion_json_object(
     }
     insert_optional_metadata(&mut map, "runId", input.run_id.as_deref());
     insert_optional_metadata(&mut map, "sourceId", input.source_id.as_deref());
+    insert_optional_metadata(&mut map, "candidateId", input.candidate_id.as_deref());
 
     let metadata = metadata_object_mut(&mut map, field_name)?;
     insert_optional_metadata(metadata, "reviewState", Some(&review_state));
@@ -364,8 +410,126 @@ fn promotion_json_object(
     }
     insert_optional_metadata(metadata, "runId", input.run_id.as_deref());
     insert_optional_metadata(metadata, "sourceId", input.source_id.as_deref());
+    insert_optional_metadata(metadata, "candidateId", input.candidate_id.as_deref());
 
     Ok(Value::Object(map).to_string())
+}
+
+fn scope_text(scope: Option<&Value>, keys: &[&str]) -> Option<String> {
+    let map = scope.and_then(Value::as_object)?;
+    for key in keys {
+        if let Some(value) = map.get(*key) {
+            if let Some(text) = value.as_str() {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn scope_year(scope: Option<&Value>) -> Option<i32> {
+    let map = scope.and_then(Value::as_object)?;
+    for key in ["year", "targetYear"] {
+        if let Some(value) = map.get(key) {
+            if let Some(year) = value.as_i64() {
+                if (0..=9999).contains(&year) {
+                    return Some(year as i32);
+                }
+            }
+            if let Some(text) = value.as_str() {
+                if let Ok(year) = text.trim().parse::<i32>() {
+                    if (0..=9999).contains(&(year as i64)) {
+                        return Some(year);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn candidate_id_for(run_id: &str, source: &Source) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(run_id);
+    hasher.update("|");
+    hasher.update(source.id.trim());
+    hasher.update("|");
+    hasher.update(source.homepage_url.as_deref().unwrap_or_default());
+    hasher.update("|");
+    hasher.update(source.name.trim());
+    let digest = format!("{:x}", hasher.finalize());
+    format!("research-candidate:{}", &digest[..16])
+}
+
+fn proposed_use_tags_for_source(source: &Source) -> Vec<String> {
+    let haystack = format!("{} {}", source.source_type, source.name).to_ascii_lowercase();
+    if haystack.contains("sanborn") || haystack.contains("map") || haystack.contains("plat") {
+        return vec!["footprint".to_string(), "date".to_string()];
+    }
+    if haystack.contains("photo") || haystack.contains("image") || haystack.contains("habs") {
+        return vec!["facade".to_string(), "date".to_string()];
+    }
+    if haystack.contains("directory")
+        || haystack.contains("occupant")
+        || haystack.contains("storefront")
+    {
+        return vec!["ground_floor_use".to_string(), "date".to_string()];
+    }
+    vec!["other".to_string()]
+}
+
+fn candidate_sources_for(
+    tenant_id: &str,
+    run_id: &str,
+    scope: Option<&Value>,
+    sources: &[Source],
+) -> Vec<ResearchCandidateSource> {
+    let parcel_ref = scope_text(scope, &["parcelRef", "parcelId", "civicObjectId"]);
+    let year = scope_year(scope);
+
+    sources
+        .iter()
+        .map(|source| {
+            let candidate_id = candidate_id_for(run_id, source);
+            let proposed_use_tags = proposed_use_tags_for_source(source);
+            let candidate_graph_key =
+                format!("civic-rustyred:{tenant_id}:research-candidate:{candidate_id}");
+            let payload = serde_json::json!({
+                "candidateId": candidate_id,
+                "runId": run_id,
+                "sourceId": source.id,
+                "status": "candidate",
+                "candidateGraphKey": candidate_graph_key,
+                "candidateStore": "civic_rustyred_candidate_graph",
+                "canonicalStore": "postgis_artifacts",
+                "promotionMutation": "promoteResearchArtifact",
+                "autoPromote": false,
+                "parcelRef": parcel_ref,
+                "year": year,
+                "proposedUseTags": proposed_use_tags,
+            });
+            ResearchCandidateSource {
+                candidate_id,
+                run_id: run_id.to_string(),
+                source_id: source.id.clone(),
+                title: source.name.clone(),
+                source_type: source.source_type.clone(),
+                uri: source.homepage_url.clone(),
+                trust_tier: source.trust_tier.clone(),
+                confidence: None,
+                status: "candidate".to_string(),
+                parcel_ref: parcel_ref.clone(),
+                year,
+                candidate_graph_key,
+                promotion_mutation: "promoteResearchArtifact".to_string(),
+                proposed_use_tags,
+                payload: async_graphql::Json(payload),
+            }
+        })
+        .collect()
 }
 
 fn millis(value: Option<DateTime<Utc>>) -> Option<i64> {
@@ -835,6 +999,7 @@ pub async fn resolve_civic_research(
         ));
     }
 
+    let scope_value = input.scope.as_ref().map(|json| json.0.clone());
     let tenant_id = default_tenant();
     let service = CivicAtlasGrpcService::new(state.clone());
 
@@ -869,12 +1034,17 @@ pub async fn resolve_civic_research(
         })?
         .into_inner();
 
+    let run_id = response.run_id;
+    let skill = response.skill;
     let results = parse_search_results(&response.results_json, &query);
+    let candidate_sources =
+        candidate_sources_for(&tenant_id, &run_id, scope_value.as_ref(), &results.sources);
 
     Ok(CivicResearchPayload {
-        run_id: response.run_id,
-        skill: response.skill,
+        run_id,
+        skill,
         results,
+        candidate_sources,
     })
 }
 
@@ -1064,6 +1234,7 @@ mod tests {
             artifact_key: None,
             run_id: Some("run:carriage-town".to_string()),
             source_id: Some("directory:1925:storefront".to_string()),
+            candidate_id: None,
             source_type: "directory".to_string(),
             title: "1925 city directory storefront row".to_string(),
             uri: Some("https://example.org/directory".to_string()),
@@ -1140,6 +1311,7 @@ mod tests {
     #[test]
     fn promotion_payload_persists_source_use_and_review_metadata() {
         let mut input = promotion_input();
+        input.candidate_id = Some("research-candidate:abc123".to_string());
         input.source_use_tags = Some(vec![
             "facade".to_string(),
             "ground-floor-use".to_string(),
@@ -1169,6 +1341,11 @@ mod tests {
             value["metadata"]["sourceUseNote"],
             "Directory row supports storefront use."
         );
+        assert_eq!(value["candidateId"], "research-candidate:abc123");
+        assert_eq!(
+            value["metadata"]["candidateId"],
+            "research-candidate:abc123"
+        );
     }
 
     #[test]
@@ -1180,5 +1357,49 @@ mod tests {
             promotion_json_object(&input.payload, "payload", &input, "artifact:1").unwrap_err();
         assert!(error.message.contains("sourceUseTags"));
         assert!(error.message.contains("vibes"));
+    }
+
+    #[test]
+    fn candidate_sources_are_hot_graph_candidates_not_artifacts() {
+        let source = Source {
+            id: "directory:1925:storefront".to_string(),
+            name: "1925 city directory storefront row".to_string(),
+            homepage_url: Some("https://example.org/directory".to_string()),
+            source_type: "directory".to_string(),
+            public_use_terms: None,
+            trust_tier: "reviewable".to_string(),
+            last_checked: None,
+            known_limits: Vec::new(),
+            contains_personal_data: false,
+        };
+        let scope = serde_json::json!({
+            "parcelRef": "carriage-town:3",
+            "year": 1925
+        });
+
+        let candidates =
+            candidate_sources_for("flint", "run:carriage-town", Some(&scope), &[source]);
+
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert!(candidate.candidate_id.starts_with("research-candidate:"));
+        assert_eq!(candidate.run_id, "run:carriage-town");
+        assert_eq!(candidate.source_id, "directory:1925:storefront");
+        assert_eq!(candidate.status, "candidate");
+        assert_eq!(candidate.parcel_ref.as_deref(), Some("carriage-town:3"));
+        assert_eq!(candidate.year, Some(1925));
+        assert_eq!(
+            candidate.proposed_use_tags,
+            vec!["ground_floor_use".to_string(), "date".to_string()]
+        );
+        assert!(candidate
+            .candidate_graph_key
+            .starts_with("civic-rustyred:flint:research-candidate:"));
+        assert_eq!(candidate.payload.0["canonicalStore"], "postgis_artifacts");
+        assert_eq!(
+            candidate.payload.0["candidateStore"],
+            "civic_rustyred_candidate_graph"
+        );
+        assert_eq!(candidate.payload.0["autoPromote"], false);
     }
 }
