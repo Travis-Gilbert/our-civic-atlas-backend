@@ -1291,7 +1291,20 @@ impl EvidenceRepository for PostgisRepository {
             LEFT JOIN buildings b
               ON b.tenant_id = p.tenant_id AND b.parcel_id = p.id
             WHERE p.tenant_id = $1
-              AND (p.id::text = $2 OR p.parcel_key = $2)
+              AND (
+                   p.id::text = $2
+                OR p.parcel_key = $2
+                -- Accept a building-id input ("building:carriage-town:3")
+                -- by joining through buildings.civic_object_id. The atelier
+                -- route addresses parcels by their containing building's
+                -- civic_object_id, not by parcel_key, so without this
+                -- branch parcel_history returns empty and focus_building
+                -- never resolves -> direct_artifacts then matches nothing.
+                OR p.id IN (
+                     SELECT parcel_id FROM buildings
+                     WHERE tenant_id = $1 AND civic_object_id = $2
+                   )
+              )
             ORDER BY b.t_start_ms NULLS FIRST, b.t_end_ms NULLS LAST
             "#,
         )
@@ -1336,6 +1349,14 @@ impl EvidenceRepository for PostgisRepository {
                    p.id::text = $2
                 OR p.parcel_key = $2
                 OR aa.building_id = NULLIF($3, '00000000-0000-0000-0000-000000000000')::uuid
+                -- Also accept a building-id input directly: when the
+                -- caller addresses by "building:carriage-town:3" rather
+                -- than by parcel_key, join through buildings to find
+                -- artifact_anchors anchored to that building.
+                OR aa.building_id IN (
+                     SELECT id FROM buildings
+                     WHERE tenant_id = $1 AND civic_object_id = $2
+                   )
               )
               AND ($4::bigint IS NULL OR COALESCE(aa.t_end_ms, a.captured_at_ms, $4) >= $4)
               AND ($5::bigint IS NULL OR COALESCE(aa.t_start_ms, a.captured_at_ms, $5) <= $5)
@@ -1367,7 +1388,18 @@ impl EvidenceRepository for PostgisRepository {
             WITH focus AS (
               SELECT geom
               FROM parcels
-              WHERE tenant_id = $1 AND (id::text = $2 OR parcel_key = $2)
+              WHERE tenant_id = $1
+                AND (
+                     id::text = $2
+                  OR parcel_key = $2
+                  -- Building-id input path: join through buildings to
+                  -- find the parcel geometry when the caller addresses
+                  -- by civic_object_id.
+                  OR id IN (
+                       SELECT parcel_id FROM buildings
+                       WHERE tenant_id = $1 AND civic_object_id = $2
+                     )
+                )
               LIMIT 1
             )
             SELECT a.id, a.artifact_key, a.source_type, a.title,
