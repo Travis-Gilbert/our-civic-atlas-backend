@@ -47,46 +47,46 @@ impl ReconstructionRequest {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct EvidenceBundle {
+pub struct EvidenceBundle<S = DecodedArtifact> {
     pub focus_building: Option<CivicObject>,
-    pub direct: Vec<Artifact>,
-    pub adjacent: Vec<Artifact>,
+    pub direct: Vec<Artifact<S>>,
+    pub adjacent: Vec<Artifact<S>>,
     pub temporal_predecessor: Option<CivicObject>,
     pub temporal_successor: Option<CivicObject>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct DirectExtraction {
-    pub spec: ReconstructionSpec,
+pub struct DirectExtraction<S = ReconstructionSpec> {
+    pub spec: S,
     pub populated_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BlockSubgraph {
+pub struct BlockSubgraph<S = ReconstructionSpec> {
     pub focus_node: String,
-    pub nodes: Vec<GraphNode>,
+    pub nodes: Vec<GraphNode<S>>,
     pub edges: Vec<GraphEdge>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct EmbeddedBlockSubgraph {
+pub struct EmbeddedBlockSubgraph<S = ReconstructionSpec> {
     pub focus_node: String,
-    pub nodes: Vec<GraphNode>,
+    pub nodes: Vec<GraphNode<S>>,
     pub edges: Vec<GraphEdge>,
     pub embedding_model: String,
     pub embedding_model_version: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PriorReconstructionSpec {
-    pub spec: ReconstructionSpec,
+pub struct PriorReconstructionSpec<S = ReconstructionSpec> {
+    pub spec: S,
     pub model_version: String,
     pub edge_confidences: Vec<EdgeRelationshipConfidence>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct MergedReconstructionSpec {
-    pub spec: ReconstructionSpec,
+pub struct MergedReconstructionSpec<S = ReconstructionSpec> {
+    pub spec: S,
     pub conflicts: Vec<MergeConflict>,
 }
 
@@ -104,19 +104,19 @@ pub struct AssetManifest {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PipelineOutput {
-    pub evidence: EvidenceBundle,
-    pub direct: DirectExtraction,
-    pub block_subgraph: BlockSubgraph,
-    pub embedded_subgraph: EmbeddedBlockSubgraph,
-    pub prior: PriorReconstructionSpec,
-    pub merged: MergedReconstructionSpec,
+pub struct PipelineOutput<Spec = ReconstructionSpec, Source = DecodedArtifact> {
+    pub evidence: EvidenceBundle<Source>,
+    pub direct: DirectExtraction<Spec>,
+    pub block_subgraph: BlockSubgraph<Spec>,
+    pub embedded_subgraph: EmbeddedBlockSubgraph<Spec>,
+    pub prior: PriorReconstructionSpec<Spec>,
+    pub merged: MergedReconstructionSpec<Spec>,
     pub asset_manifest: AssetManifest,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Artifact {
+pub struct Artifact<S = DecodedArtifact> {
     pub artifact_id: String,
     pub artifact_key: String,
     pub source_type: String,
@@ -126,11 +126,11 @@ pub struct Artifact {
     pub captured_at_ms: Option<i64>,
     pub fetched_at_ms: Option<i64>,
     pub content_hash: String,
-    pub decoded: DecodedArtifact,
+    pub decoded: S,
     pub metadata: BTreeMap<String, String>,
 }
 
-impl Artifact {
+impl<S> Artifact<S> {
     fn source(&self) -> ReconstructionSource {
         ReconstructionSource {
             source_id: self.artifact_id.clone(),
@@ -193,11 +193,11 @@ pub enum DecodedArtifact {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GraphNode {
+pub struct GraphNode<S = ReconstructionSpec> {
     pub node_id: String,
     pub node_type: String,
     pub object: Option<CivicObject>,
-    pub direct_spec: Option<ReconstructionSpec>,
+    pub direct_spec: Option<S>,
     pub embedding: Vec<f32>,
     pub missing_embedding: bool,
     pub attributes: BTreeMap<String, String>,
@@ -349,28 +349,30 @@ pub struct NodeEmbedding {
 }
 
 #[async_trait]
-pub trait EvidenceRepository: Send + Sync {
+pub trait EvidenceRepository<S = DecodedArtifact>: Send + Sync {
     async fn parcel_history(&self, request: &ReconstructionRequest) -> Result<Vec<CivicObject>>;
     async fn direct_artifacts(
         &self,
         request: &ReconstructionRequest,
         focus_building: Option<&CivicObject>,
-    ) -> Result<Vec<Artifact>>;
+    ) -> Result<Vec<Artifact<S>>>;
     async fn adjacent_artifacts(
         &self,
         request: &ReconstructionRequest,
         focus_building: Option<&CivicObject>,
         radius_m: f64,
-    ) -> Result<Vec<Artifact>>;
+    ) -> Result<Vec<Artifact<S>>>;
 }
 
 #[async_trait]
-pub trait BlockSubgraphRepository: Send + Sync {
+pub trait BlockSubgraphRepository<S = ReconstructionSpec, Source = DecodedArtifact>:
+    Send + Sync
+{
     async fn block_subgraph(
         &self,
         request: &ReconstructionRequest,
-        evidence: &EvidenceBundle,
-    ) -> Result<BlockSubgraph>;
+        evidence: &EvidenceBundle<Source>,
+    ) -> Result<BlockSubgraph<S>>;
 }
 
 #[async_trait]
@@ -382,17 +384,85 @@ pub trait EmbeddingProvider: Send + Sync {
     ) -> Result<EmbeddingBatch>;
 }
 
-pub trait PriorModel: Send + Sync {
+pub trait PriorModel<S = ReconstructionSpec>: Send + Sync {
     fn infer(
         &self,
-        graph: &EmbeddedBlockSubgraph,
-        direct: &DirectExtraction,
-    ) -> Result<PriorReconstructionSpec>;
+        graph: &EmbeddedBlockSubgraph<S>,
+        direct: &DirectExtraction<S>,
+    ) -> Result<PriorReconstructionSpec<S>>;
 }
 
 #[async_trait]
-pub trait AssetGenerator: Send + Sync {
-    async fn generate(&self, spec: &MergedReconstructionSpec) -> Result<AssetManifest>;
+pub trait AssetGenerator<S = ReconstructionSpec>: Send + Sync {
+    async fn generate(&self, spec: &MergedReconstructionSpec<S>) -> Result<AssetManifest>;
+}
+
+pub trait ReconstructionDomain {
+    type Source;
+    type Spec: Clone;
+
+    fn extract_direct(
+        request: &ReconstructionRequest,
+        evidence: &EvidenceBundle<Self::Source>,
+    ) -> Result<DirectExtraction<Self::Spec>>;
+
+    fn merge(
+        direct: &DirectExtraction<Self::Spec>,
+        prior: &PriorReconstructionSpec<Self::Spec>,
+        config: MergeConfig,
+    ) -> Result<MergedReconstructionSpec<Self::Spec>>;
+
+    fn spec_to_subgraph(_spec: &Self::Spec) -> BlockSubgraph<Self::Spec> {
+        BlockSubgraph {
+            focus_node: String::new(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BuildingDomain;
+
+impl ReconstructionDomain for BuildingDomain {
+    type Source = DecodedArtifact;
+    type Spec = ReconstructionSpec;
+
+    fn extract_direct(
+        request: &ReconstructionRequest,
+        evidence: &EvidenceBundle<Self::Source>,
+    ) -> Result<DirectExtraction<Self::Spec>> {
+        extract_direct(request, evidence)
+    }
+
+    fn merge(
+        direct: &DirectExtraction<Self::Spec>,
+        prior: &PriorReconstructionSpec<Self::Spec>,
+        config: MergeConfig,
+    ) -> Result<MergedReconstructionSpec<Self::Spec>> {
+        merge_evidence_prior(direct, prior, config)
+    }
+
+    fn spec_to_subgraph(spec: &Self::Spec) -> BlockSubgraph<Self::Spec> {
+        let focus_node = if spec.building_id.is_empty() {
+            format!("parcel:{}", spec.parcel_id)
+        } else {
+            spec.building_id.clone()
+        };
+        BlockSubgraph {
+            focus_node: focus_node.clone(),
+            nodes: vec![GraphNode {
+                node_id: focus_node,
+                node_type: "BuildingPresence".to_string(),
+                object: None,
+                direct_spec: Some(spec.clone()),
+                embedding: Vec::new(),
+                missing_embedding: true,
+                attributes: BTreeMap::new(),
+            }],
+            edges: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -414,20 +484,45 @@ pub async fn run_full_pipeline<R, E, M, A>(
     embeddings: &E,
     prior_model: &M,
     asset_generator: &A,
-) -> Result<PipelineOutput>
+) -> Result<PipelineOutput<ReconstructionSpec, DecodedArtifact>>
 where
-    R: EvidenceRepository + BlockSubgraphRepository,
+    R: EvidenceRepository<DecodedArtifact>
+        + BlockSubgraphRepository<ReconstructionSpec, DecodedArtifact>,
     E: EmbeddingProvider,
-    M: PriorModel,
-    A: AssetGenerator,
+    M: PriorModel<ReconstructionSpec>,
+    A: AssetGenerator<ReconstructionSpec>,
+{
+    run_domain_pipeline::<BuildingDomain, _, _, _, _>(
+        request,
+        repository,
+        embeddings,
+        prior_model,
+        asset_generator,
+    )
+    .await
+}
+
+pub async fn run_domain_pipeline<D, R, E, M, A>(
+    request: ReconstructionRequest,
+    repository: &R,
+    embeddings: &E,
+    prior_model: &M,
+    asset_generator: &A,
+) -> Result<PipelineOutput<D::Spec, D::Source>>
+where
+    D: ReconstructionDomain,
+    R: EvidenceRepository<D::Source> + BlockSubgraphRepository<D::Spec, D::Source>,
+    E: EmbeddingProvider,
+    M: PriorModel<D::Spec>,
+    A: AssetGenerator<D::Spec>,
 {
     request.validate()?;
     let evidence = assemble_evidence(repository, &request).await?;
-    let direct = extract_direct(&request, &evidence)?;
+    let direct = D::extract_direct(&request, &evidence)?;
     let block_subgraph = build_block_subgraph(repository, &request, &evidence, &direct).await?;
     let embedded_subgraph = hydrate_embeddings(embeddings, &request, &block_subgraph).await?;
     let prior = infer_priors(prior_model, &embedded_subgraph, &direct)?;
-    let merged = merge_evidence_prior(&direct, &prior, MergeConfig::default())?;
+    let merged = D::merge(&direct, &prior, MergeConfig::default())?;
     let asset_manifest = generate_assets(asset_generator, &merged).await?;
     Ok(PipelineOutput {
         evidence,
@@ -440,12 +535,12 @@ where
     })
 }
 
-pub async fn assemble_evidence<R>(
+pub async fn assemble_evidence<R, S>(
     repository: &R,
     request: &ReconstructionRequest,
-) -> Result<EvidenceBundle>
+) -> Result<EvidenceBundle<S>>
 where
-    R: EvidenceRepository,
+    R: EvidenceRepository<S>,
 {
     let history = repository.parcel_history(request).await?;
     let focus_index = history
@@ -651,11 +746,23 @@ pub fn extract_direct(
             DecodedArtifact::GisFeature { attributes, .. } => {
                 let story_count = attribute_u32_any(
                     attributes,
-                    &["stories", "story_count", "num_stories", "Cib_Storie", "Dwelling_U"],
+                    &[
+                        "stories",
+                        "story_count",
+                        "num_stories",
+                        "Cib_Storie",
+                        "Dwelling_U",
+                    ],
                 );
                 let use_type = attribute_string_any(
                     attributes,
-                    &["use_type", "Use_Type", "property_class", "Prop_Class", "LandUse"],
+                    &[
+                        "use_type",
+                        "Use_Type",
+                        "property_class",
+                        "Prop_Class",
+                        "LandUse",
+                    ],
                 );
                 let primary_material = attribute_string_any(
                     attributes,
@@ -756,14 +863,15 @@ pub fn extract_direct(
     })
 }
 
-pub async fn build_block_subgraph<R>(
+pub async fn build_block_subgraph<R, Spec, Source>(
     repository: &R,
     request: &ReconstructionRequest,
-    evidence: &EvidenceBundle,
-    direct: &DirectExtraction,
-) -> Result<BlockSubgraph>
+    evidence: &EvidenceBundle<Source>,
+    direct: &DirectExtraction<Spec>,
+) -> Result<BlockSubgraph<Spec>>
 where
-    R: BlockSubgraphRepository,
+    R: BlockSubgraphRepository<Spec, Source>,
+    Spec: Clone,
 {
     let mut graph = repository.block_subgraph(request, evidence).await?;
     if graph.focus_node.is_empty() {
@@ -796,13 +904,14 @@ where
     Ok(graph)
 }
 
-pub async fn hydrate_embeddings<E>(
+pub async fn hydrate_embeddings<E, S>(
     provider: &E,
     request: &ReconstructionRequest,
-    graph: &BlockSubgraph,
-) -> Result<EmbeddedBlockSubgraph>
+    graph: &BlockSubgraph<S>,
+) -> Result<EmbeddedBlockSubgraph<S>>
 where
     E: EmbeddingProvider,
+    S: Clone,
 {
     let node_ids: Vec<String> = graph
         .nodes
@@ -840,13 +949,13 @@ where
     })
 }
 
-pub fn infer_priors<M>(
+pub fn infer_priors<M, S>(
     model: &M,
-    graph: &EmbeddedBlockSubgraph,
-    direct: &DirectExtraction,
-) -> Result<PriorReconstructionSpec>
+    graph: &EmbeddedBlockSubgraph<S>,
+    direct: &DirectExtraction<S>,
+) -> Result<PriorReconstructionSpec<S>>
 where
-    M: PriorModel,
+    M: PriorModel<S>,
 {
     model.infer(graph, direct)
 }
@@ -930,12 +1039,12 @@ pub fn merge_evidence_prior(
     })
 }
 
-pub async fn generate_assets<A>(
+pub async fn generate_assets<A, S>(
     generator: &A,
-    merged: &MergedReconstructionSpec,
+    merged: &MergedReconstructionSpec<S>,
 ) -> Result<AssetManifest>
 where
-    A: AssetGenerator,
+    A: AssetGenerator<S>,
 {
     generator.generate(merged).await
 }
@@ -1989,7 +2098,10 @@ fn decode_artifact(source_type: &str, payload: &Value) -> DecodedArtifact {
             use_type: optional_string_any(payload, &["useType", "use_type"]),
         };
     }
-    if lower.contains("gis_feature") || lower.contains("assessor") || lower.contains("parcel_record") {
+    if lower.contains("gis_feature")
+        || lower.contains("assessor")
+        || lower.contains("parcel_record")
+    {
         let attributes = payload
             .get("attributes")
             .or_else(|| payload.get("properties"))
@@ -2008,7 +2120,12 @@ fn decode_artifact(source_type: &str, payload: &Value) -> DecodedArtifact {
             source_layer: optional_string_any(payload, &["sourceLayer", "source_layer", "layer"]),
             capture_date_ms: i64_any(
                 payload,
-                &["captureDateMs", "capture_date_ms", "capturedAtMs", "captured_at_ms"],
+                &[
+                    "captureDateMs",
+                    "capture_date_ms",
+                    "capturedAtMs",
+                    "captured_at_ms",
+                ],
             ),
         };
     }
@@ -2019,7 +2136,12 @@ fn decode_artifact(source_type: &str, payload: &Value) -> DecodedArtifact {
             band_count: u32_any(payload, &["bandCount", "band_count"]),
             capture_date_ms: i64_any(
                 payload,
-                &["captureDateMs", "capture_date_ms", "capturedAtMs", "captured_at_ms"],
+                &[
+                    "captureDateMs",
+                    "capture_date_ms",
+                    "capturedAtMs",
+                    "captured_at_ms",
+                ],
             ),
         };
     }
@@ -2349,7 +2471,8 @@ fn value_to_u32(value: &Value) -> Option<u32> {
     if let Some(number) = value.as_u64() {
         return u32::try_from(number).ok();
     }
-    value.as_str()
+    value
+        .as_str()
         .and_then(|text| text.trim().parse::<f64>().ok())
         .and_then(|number| u32::try_from(number as i64).ok())
 }
@@ -3311,6 +3434,51 @@ mod tests {
             .any(|node| node.node_id == Uuid::nil().to_string()));
     }
 
+    #[tokio::test]
+    async fn building_domain_pipeline_matches_legacy_wrapper() {
+        let repo = InMemoryRepository {
+            parcel_history: vec![CivicObject {
+                id: Uuid::nil().to_string(),
+                tenant_id: "flint".to_string(),
+                name: "building:ct-1".to_string(),
+                object_type: "BuildingPresence".to_string(),
+                geometry_json: "{}".to_string(),
+                time_start_ms: Some(0),
+                time_end_ms: None,
+                confidence: 1.0,
+                source_ids: Vec::new(),
+                dossier_path: String::new(),
+                attributes: HashMap::from([(
+                    "block_id".to_string(),
+                    "block:carriage-town".to_string(),
+                )]),
+            }],
+            direct_artifacts: vec![sanborn_artifact()],
+            ..Default::default()
+        };
+
+        let wrapper_output = run_full_pipeline(
+            request(),
+            &repo,
+            &ZeroEmbeddingProvider::default(),
+            &BlockCoherentPriorModel::default(),
+            &SceneFoundryManifestGenerator::default(),
+        )
+        .await
+        .expect("legacy wrapper runs");
+        let domain_output = run_domain_pipeline::<BuildingDomain, _, _, _, _>(
+            request(),
+            &repo,
+            &ZeroEmbeddingProvider::default(),
+            &BlockCoherentPriorModel::default(),
+            &SceneFoundryManifestGenerator::default(),
+        )
+        .await
+        .expect("building domain pipeline runs");
+
+        assert_eq!(domain_output, wrapper_output);
+    }
+
     #[test]
     fn photo_without_mass_signal_does_not_block_later_sanborn_story_count() {
         let evidence = EvidenceBundle {
@@ -3359,10 +3527,7 @@ mod tests {
         assert_eq!(mass.stories, 3);
         assert_eq!(mass.provenance.unwrap().part_confidence, 0.95);
         assert_eq!(direct.spec.facades[0].primary_material, "brick");
-        assert_eq!(
-            direct.spec.ground_floor.unwrap().use_type,
-            "commercial"
-        );
+        assert_eq!(direct.spec.ground_floor.unwrap().use_type, "commercial");
         assert!(direct
             .populated_fields
             .iter()
