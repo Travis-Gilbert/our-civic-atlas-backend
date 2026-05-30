@@ -7,6 +7,12 @@
 #
 # Build:   docker build -t civic-atlas-backend .
 # Run:     docker run -p 8080:8080 -e PORT=8080 civic-atlas-backend
+#
+# Deploy note (2026-05-30): Railway deploys this repo's `main` branch and the
+# civic-atlas-server build requires rustc >= 1.89 (async-graphql 7.2.1,
+# asynk-strim 0.1.5). Do not redeploy pre-1.89 commits such as the 8bdf250-era
+# seed commits; they fail the build on the old 1.88 pin. Always deploy main's
+# current tip.
 
 # --- stage 1: build ---------------------------------------------------
 # rust:1.89 because async-graphql@7.2.1 (pulled in by the Axum-native
