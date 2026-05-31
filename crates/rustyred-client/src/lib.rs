@@ -14,9 +14,18 @@
 //!
 //! # What this client owns
 //!
+//! - Full-text search (`graph/fulltext/search`) over a designated
+//!   `(label, property)` pair. This is the entrypoint the `civicResearch`
+//!   GraphQL mutation uses to read prior knowledge from the graph.
+//! - Spatial bounding-box search (`graph/spatial/bbox`) over a designated
+//!   `(label, lat_property, lon_property)` pair. Used to intersect a
+//!   bbox-scoped research query against the full-text hit set client-side
+//!   (RustyRed has no combined fulltext+spatial endpoint).
+//! - Node hydration (`GET graph/nodes/:node_id`) so full-text hits, which
+//!   carry only `node_id` + `score`, can be projected with a real
+//!   label/snippet/url from the node's properties.
 //! - Hybrid vector + graph search (HNSW + graph proximity blend) for
-//!   civic-atlas search surfaces, including the `civicResearch` GraphQL
-//!   mutation.
+//!   civic-atlas search surfaces that have a designated vector property.
 //! - (Future scope) Node + edge bulk upsert for the
 //!   `civic-atlas-outbox-worker` write path. Currently the outbox writes
 //!   via the `theseus-client` crate (which lands in Theseus's THG); that
@@ -193,6 +202,89 @@ impl Client {
         }
         Ok(response.json().await?)
     }
+
+    /// `POST /v1/tenants/:tenant_id/graph/fulltext/search`.
+    ///
+    /// Full-text search over a designated `(label, property)` pair. The
+    /// `(label, property)` must have been pre-designated on the RustyRed
+    /// deployment via `graph/fulltext/designate`; searching an
+    /// undesignated property returns an empty result set.
+    ///
+    /// This is the entrypoint the `civicResearch` GraphQL mutation uses to
+    /// read prior knowledge from the graph. RustyRed returns ONLY
+    /// `{ node_id, score }` per hit (no node payload), so callers that need
+    /// a human label/snippet hydrate each hit with [`Client::get_node`].
+    pub async fn fulltext_search(
+        &self,
+        tenant_id: &str,
+        request: &FullTextSearchRequest,
+    ) -> Result<FullTextSearchResponse, RustyRedError> {
+        let path = format!("/v1/tenants/{tenant_id}/graph/fulltext/search");
+        let url = format!("{}{path}", self.config.base_url);
+        let response = self.http.post(&url).json(request).send().await?;
+        if !response.status().is_success() {
+            return Err(make_upstream_error(response, &path).await);
+        }
+        Ok(response.json().await?)
+    }
+
+    /// `POST /v1/tenants/:tenant_id/graph/spatial/bbox`.
+    ///
+    /// Returns the unranked node-id list whose `(lat_property,
+    /// lon_property)` falls inside the bounding box. The
+    /// `(label, lat_property, lon_property)` triple must have been
+    /// pre-designated via `graph/spatial/designate`; an undesignated label
+    /// errors. There are no scores and no node payloads in the response.
+    ///
+    /// Used to intersect a bbox-scoped `civicResearch` query against the
+    /// full-text hit set client-side: RustyRed has no combined
+    /// fulltext+spatial endpoint, so the resolver runs both and keeps the
+    /// node ids present in both result sets.
+    pub async fn spatial_bounding_box(
+        &self,
+        tenant_id: &str,
+        request: &SpatialBboxRequest,
+    ) -> Result<SpatialBboxResponse, RustyRedError> {
+        let path = format!("/v1/tenants/{tenant_id}/graph/spatial/bbox");
+        let url = format!("{}{path}", self.config.base_url);
+        let response = self.http.post(&url).json(request).send().await?;
+        if !response.status().is_success() {
+            return Err(make_upstream_error(response, &path).await);
+        }
+        Ok(response.json().await?)
+    }
+
+    /// `GET /v1/tenants/:tenant_id/graph/nodes/:node_id`.
+    ///
+    /// Fetches a single node so full-text hits (which carry only
+    /// `node_id` + `score`) can be projected with a real label, snippet,
+    /// and url drawn from the node's `properties`.
+    ///
+    /// RustyRed returns a bare `404` when the node is missing. This method
+    /// degrades that to `Ok(NodeFetchResponse { ok: false, node: None, .. })`
+    /// so a missing node yields a minimal hit instead of erroring the whole
+    /// research call. Any other non-2xx status is surfaced as an
+    /// [`RustyRedError::Upstream`].
+    pub async fn get_node(
+        &self,
+        tenant_id: &str,
+        node_id: &str,
+    ) -> Result<NodeFetchResponse, RustyRedError> {
+        let path = format!("/v1/tenants/{tenant_id}/graph/nodes/{node_id}");
+        let url = format!("{}{path}", self.config.base_url);
+        let response = self.http.get(&url).send().await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(NodeFetchResponse {
+                ok: false,
+                node: None,
+                extra: serde_json::Map::new(),
+            });
+        }
+        if !response.status().is_success() {
+            return Err(make_upstream_error(response, &path).await);
+        }
+        Ok(response.json().await?)
+    }
 }
 
 /// `GET /health` response.
@@ -281,6 +373,111 @@ pub struct HybridSearchItem {
     pub extra: serde_json::Map<String, Value>,
 }
 
+/// Body of the full-text search request. Matches RustyRed's
+/// `FullTextSearchBody` in `crates/rustyred-server/src/router.rs`.
+#[derive(Debug, Clone, Serialize)]
+pub struct FullTextSearchRequest {
+    /// Optional node label filter. When `None`, the designated default
+    /// label applies on the server side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The designated full-text property to search. Required. Must match a
+    /// `(label, property)` pair previously registered via
+    /// `graph/fulltext/designate`.
+    pub property: String,
+    /// The query string. RustyRed tokenizes + matches this against the
+    /// designated property's full-text index.
+    pub query: String,
+    /// Top-k.
+    pub k: usize,
+}
+
+/// Body of the full-text search response. RustyRed returns
+/// `{ ok, tenant, results: [{ node_id, score }] }`. Unlike the hybrid
+/// response, full-text hits carry NO node payload, so [`FullTextHit`]
+/// cannot expose a label/snippet/properties directly: callers hydrate via
+/// [`Client::get_node`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct FullTextSearchResponse {
+    #[serde(default = "default_true")]
+    pub ok: bool,
+    #[serde(default)]
+    pub tenant: Option<String>,
+    #[serde(default)]
+    pub results: Vec<FullTextHit>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// A single full-text hit. RustyRed emits only `node_id` + `score`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FullTextHit {
+    #[serde(default)]
+    pub node_id: Option<String>,
+    #[serde(default)]
+    pub score: Option<f32>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// Body of the spatial bounding-box request. Matches RustyRed's
+/// `SpatialBboxBody` in `crates/rustyred-server/src/router.rs`. All of
+/// `label`, `lat_property`, and `lon_property` are required (the server
+/// body struct declares them non-optional).
+#[derive(Debug, Clone, Serialize)]
+pub struct SpatialBboxRequest {
+    pub label: String,
+    pub lat_property: String,
+    pub lon_property: String,
+    pub min_lat: f64,
+    pub min_lon: f64,
+    pub max_lat: f64,
+    pub max_lon: f64,
+}
+
+/// Body of the spatial bounding-box response. RustyRed returns
+/// `{ ok, tenant, count, node_ids: [String] }`: an unranked node-id list
+/// with no scores and no node payloads.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpatialBboxResponse {
+    #[serde(default = "default_true")]
+    pub ok: bool,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub node_ids: Vec<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// Response of `GET graph/nodes/:node_id`. RustyRed returns
+/// `{ ok, node }` on a hit and a bare `404` on a miss. [`Client::get_node`]
+/// maps the `404` to `{ ok: false, node: None }`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NodeFetchResponse {
+    #[serde(default = "default_true")]
+    pub ok: bool,
+    #[serde(default)]
+    pub node: Option<NodeRecord>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// A node record as RustyRed serializes it (`graph_store::NodeRecord`).
+/// We keep only the fields the civic-atlas resolver hydrates from
+/// (`id`, `labels`, `properties`); the rest ride on `extra`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NodeRecord {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub properties: serde_json::Map<String, Value>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
 async fn make_upstream_error(response: reqwest::Response, path: &str) -> RustyRedError {
     let status = response.status().as_u16();
     let body = response
@@ -332,5 +529,61 @@ mod tests {
         assert!(!body.contains("alpha"));
         assert!(body.contains("\"property\":\"embedding\""));
         assert!(body.contains("\"k\":5"));
+    }
+
+    #[test]
+    fn fulltext_request_omits_label_when_none() {
+        let request = FullTextSearchRequest {
+            label: None,
+            property: "name".into(),
+            query: "carriage town".into(),
+            k: 20,
+        };
+        let body = serde_json::to_string(&request).expect("serializable");
+        assert!(!body.contains("label"));
+        assert!(body.contains("\"property\":\"name\""));
+        assert!(body.contains("\"query\":\"carriage town\""));
+        assert!(body.contains("\"k\":20"));
+    }
+
+    #[test]
+    fn spatial_bbox_request_serializes_bounds() {
+        let request = SpatialBboxRequest {
+            label: "Place".into(),
+            lat_property: "lat".into(),
+            lon_property: "lon".into(),
+            min_lat: 42.9,
+            min_lon: -83.8,
+            max_lat: 43.1,
+            max_lon: -83.6,
+        };
+        let body = serde_json::to_string(&request).expect("serializable");
+        assert!(body.contains("\"label\":\"Place\""));
+        assert!(body.contains("\"lat_property\":\"lat\""));
+        assert!(body.contains("\"lon_property\":\"lon\""));
+        assert!(body.contains("\"min_lat\":42.9"));
+        assert!(body.contains("\"min_lon\":-83.8"));
+        assert!(body.contains("\"max_lat\":43.1"));
+        assert!(body.contains("\"max_lon\":-83.6"));
+    }
+
+    #[test]
+    fn fulltext_response_parses_node_id_and_score() {
+        let raw = serde_json::json!({
+            "ok": true,
+            "tenant": "flint",
+            "results": [
+                { "node_id": "node:1", "score": 0.83 },
+                { "node_id": "node:2", "score": 0.41 },
+            ],
+        })
+        .to_string();
+        let parsed: FullTextSearchResponse =
+            serde_json::from_str(&raw).expect("deserializable");
+        assert!(parsed.ok);
+        assert_eq!(parsed.tenant.as_deref(), Some("flint"));
+        assert_eq!(parsed.results.len(), 2);
+        assert_eq!(parsed.results[0].node_id.as_deref(), Some("node:1"));
+        assert_eq!(parsed.results[0].score, Some(0.83));
     }
 }

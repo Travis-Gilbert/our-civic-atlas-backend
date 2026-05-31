@@ -90,7 +90,15 @@ cargo run -p civic-atlas-cli -- spec submit path/to/spec.json
 - `CIVIC_ATLAS_PLACES_FIXTURE`: optional GeoJSON places fixture for the first
   `placesList` migration path.
 - `CIVIC_ATLAS_DEFAULT_TENANT`: default fixture tenant, default `flint`.
-- `THESEUS_BRIDGE_URL`: gRPC URL for the Theseus bridge process.
+- `THEOREM_SEARCH_URL`: gRPC URL for the Rust-native `theseus_search.v1.SearchService`
+  host. This is the search dial for `civic_research`. If unset, the resolver falls
+  back to `THESEUS_BRIDGE_URL` (legacy Django bridge) only so production does not
+  regress before the Rust endpoint exists; do NOT point this at the Django bridge.
+  Leaving both unset surfaces an honest backend-pending state.
+- `THESEUS_BRIDGE_URL`: gRPC URL for the embedding-hydration sidecar
+  (`theseus_bridge.v1.TheseusBridge`: spacetime topics, `GetBatchSpacetimeEmbeddings`,
+  artifact ingest), consumed by the reconstruction-engine and outbox-worker. This now
+  scopes to embedding hydration only, not search.
 - `RECONSTRUCTION_JOB_BATCH_SIZE`: worker batch size for procedural
   reconstruction jobs, default `4`.
 - `SCENE_FOUNDRY_URI_PREFIX`: asset manifest URI prefix while the Blender/Ray
