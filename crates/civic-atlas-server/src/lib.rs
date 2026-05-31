@@ -302,36 +302,7 @@ impl CivicAtlasService for CivicAtlasGrpcService {
                 //
                 // provenanceRootId empty + synthetic run_id: provenance
                 // graph rooting belongs to the Theorem epistemic slice.
-                let run_id = format!("civic-atlas:{}", Uuid::new_v4());
-                let results_json = serde_json::to_string(&json!({
-                    "query": query,
-                    "runId": &run_id,
-                    "totalReturned": 0,
-                    "totalAdmitted": 0,
-                    "roundsExecuted": 0,
-                    "latencyMs": 0,
-                    "metadata": {
-                        "mode": "civic_atlas",
-                        "substrate": "rustyred",
-                        "searchService": "rustyred.graph.fulltext",
-                        "degraded": true,
-                    },
-                    "priorKnowledge": [],
-                    "newEvidence": [],
-                    "gapClosures": [json!({
-                        "gapId": "rustyred_unconfigured",
-                        "description": "rustyred_unconfigured: research sources are not connected yet",
-                        "closed": false,
-                        "evidenceCount": 0,
-                    })],
-                    "provenanceRootId": "",
-                }))
-                .unwrap_or_else(|_| String::from("{}"));
-                return Ok(Response::new(CivicResearchResponse {
-                    run_id,
-                    skill: String::from("civic_atlas"),
-                    results_json,
-                }));
+                return Ok(Response::new(rustyred_unconfigured_response(&query)));
             }
             Err(err) => {
                 return Err(Status::unavailable(format!(
@@ -358,12 +329,24 @@ impl CivicAtlasService for CivicAtlasGrpcService {
             query: query.clone(),
             k: scope.top_k,
         };
-        let ft = rustyred
-            .fulltext_search(tenant.as_str(), &ft_req)
-            .await
-            .map_err(|err| {
-                Status::internal(format!("rustyred fulltext search failed: {err}"))
-            })?;
+        // RustyRed returns an *error*, not an empty set, when this tenant has
+        // no fulltext designation yet OR when a search matches nothing (both
+        // surface as a `store_unavailable` / `store_mode_unsupported` upstream
+        // response). That is a not-wired empty state, not a server fault, so we
+        // degrade it to the same calm `rustyred_unconfigured` response as the
+        // unset path. Genuine failures (network, other 5xx) still surface as
+        // Status::internal.
+        let ft = match rustyred.fulltext_search(tenant.as_str(), &ft_req).await {
+            Ok(ft) => ft,
+            Err(err) if is_rustyred_store_unavailable(&err) => {
+                return Ok(Response::new(rustyred_unconfigured_response(&query)));
+            }
+            Err(err) => {
+                return Err(Status::internal(format!(
+                    "rustyred fulltext search failed: {err}"
+                )));
+            }
+        };
 
         // (2) Optional spatial bbox intersection. RustyRed has no combined
         // fulltext+spatial endpoint, so when scope_json carries a bbox we
@@ -713,6 +696,59 @@ impl ResearchScope {
             None
         }
     }
+}
+
+/// Build the calm "research sources are not connected yet" response. Used both
+/// when `RUSTYRED_URL` is unset (`RustyRedError::Config`) and when RustyRed
+/// reports its fulltext store is unavailable for this tenant: RustyRed returns
+/// an error (not an empty set) when no `(label, property)` is designated yet
+/// AND when a search matches nothing, so both are a not-wired empty state, not
+/// a 500. `degraded: true` plus the `rustyred_unconfigured` gapClosure tells
+/// the Node sidecar to render "Research sources are not connected yet".
+fn rustyred_unconfigured_response(query: &str) -> CivicResearchResponse {
+    let run_id = format!("civic-atlas:{}", Uuid::new_v4());
+    let results_json = serde_json::to_string(&json!({
+        "query": query,
+        "runId": &run_id,
+        "totalReturned": 0,
+        "totalAdmitted": 0,
+        "roundsExecuted": 0,
+        "latencyMs": 0,
+        "metadata": {
+            "mode": "civic_atlas",
+            "substrate": "rustyred",
+            "searchService": "rustyred.graph.fulltext",
+            "degraded": true,
+        },
+        "priorKnowledge": [],
+        "newEvidence": [],
+        "gapClosures": [json!({
+            "gapId": "rustyred_unconfigured",
+            "description": "rustyred_unconfigured: research sources are not connected yet",
+            "closed": false,
+            "evidenceCount": 0,
+        })],
+        "provenanceRootId": "",
+    }))
+    .unwrap_or_else(|_| String::from("{}"));
+    CivicResearchResponse {
+        run_id,
+        skill: String::from("civic_atlas"),
+        results_json,
+    }
+}
+
+/// True when a RustyRed error means the fulltext store is not usable for this
+/// tenant yet: no `(label, property)` designation, or a zero-result search.
+/// RustyRed surfaces both as a `store_unavailable` / `store_mode_unsupported`
+/// upstream response rather than an empty result set, so `civic_research`
+/// treats them as a calm empty state instead of a hard failure.
+fn is_rustyred_store_unavailable(err: &RustyRedError) -> bool {
+    matches!(
+        err,
+        RustyRedError::Upstream { body, .. }
+            if body.contains("store_unavailable") || body.contains("store_mode_unsupported")
+    )
 }
 
 /// Project a single RustyRed full-text hit (plus its hydrated node, when
