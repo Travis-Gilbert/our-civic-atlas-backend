@@ -15,12 +15,12 @@ chrono.workspace = true
 civic-atlas-reconstruction-engine = { path = "../civic-atlas-reconstruction-engine" }
 civic-atlas-types = { path = "../civic-atlas-types" }
 prost.workspace = true
+rustyred-client = { path = "../rustyred-client" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 tenant-resolver = { path = "../tenant-resolver" }
-theseus-client = { path = "../theseus-client" }
 tokio.workspace = true
 tonic.workspace = true
 tonic-web.workspace = true

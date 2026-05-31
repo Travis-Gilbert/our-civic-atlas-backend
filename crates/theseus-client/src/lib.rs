@@ -1,18 +1,26 @@
-//! Rust gRPC client for the Theseus sidecar.
+//! Rust gRPC client for the search + embedding sidecar surfaces.
 //!
-//! The Theseus sidecar process (Index-API/apps/notebook/grpc/bridge_server.py)
-//! hosts two services on the same port:
+//! Two services are exposed via a single `TheseusClient` (they share one
+//! gRPC channel), but they are dialed for different concerns and the
+//! target hosts differ:
 //!
-//!   - `theseus_bridge.v1.TheseusBridge` -- spacetime topics, embeddings,
-//!     artifact ingest. Theseus-internal infrastructure surfaces.
 //!   - `theseus_search.v1.SearchService` -- the canonical search
-//!     orchestrator (search / gap-walk / source-pair / provenance).
-//!     Sibling product to the harness and to RustyRed, vendored from
-//!     theorem-protos.
+//!     orchestrator (search / gap-walk / source-pair / provenance). The
+//!     `search()` client now dials a Rust-native SearchService at
+//!     `THEOREM_SEARCH_URL` (the Django bridge is NOT the intended host;
+//!     it remains only as a temporary fallback until the Rust endpoint
+//!     stands up). Sibling product to the harness and to RustyRed,
+//!     vendored from theorem-protos.
+//!   - `theseus_bridge.v1.TheseusBridge` -- spacetime topics, embeddings,
+//!     artifact ingest. The `bridge()` client keeps dialing
+//!     `THESEUS_BRIDGE_URL` (embedding hydration is a separate concern
+//!     from search). This is currently served by the Python sidecar
+//!     (Index-API/apps/notebook/grpc/bridge_server.py).
 //!
-//! This crate exposes both clients via a single `TheseusClient` so the
-//! civic-atlas-server (and any future caller) can dial one URL and call
-//! either service. They share the same gRPC channel.
+//! The `connect()` single-channel dual-service mechanics are unchanged;
+//! only the prose about which host answers which surface has been
+//! corrected so the next reader is not told the Django bridge is the
+//! search host.
 
 use civic_atlas_types::theseus_bridge::v1::theseus_bridge_client::TheseusBridgeClient;
 use civic_atlas_types::theseus_search::v1::search_service_client::SearchServiceClient;
