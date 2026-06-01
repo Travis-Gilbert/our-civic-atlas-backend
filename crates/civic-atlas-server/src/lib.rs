@@ -291,6 +291,17 @@ impl CivicAtlasService for CivicAtlasGrpcService {
         // logged and skipped; civic_research still returns the provider hits.
         append_frontier_crawl(tenant.as_str(), &query, &mut new_evidence).await;
 
+        // ArcGIS REST: structured Flint civic features (parcels, addresses) for
+        // the query, from the configured ARCGIS_REST_ENDPOINTS layers. Appended
+        // after the crawl so the synthetic feature URLs are not crawl seeds.
+        // Best-effort: unset env or any error yields nothing.
+        new_evidence.extend(fetch_arcgis_new_evidence(&query).await);
+
+        // OSM Overpass: building footprints in the query's spatial scope, when
+        // the request carries a bbox (parcel/area-scoped research). Free-text
+        // queries have no bbox, so OSM is skipped. Best-effort, structured.
+        new_evidence.extend(fetch_osm_new_evidence(&request.scope_json).await);
+
         // Reach RustyRed via env construction per-call. The expected usage
         // pattern is one call per user research query (low rate, long
         // tail), so the per-call client build is acceptable; if call
@@ -927,6 +938,266 @@ fn is_rustyred_store_unavailable(err: &RustyRedError) -> bool {
         RustyRedError::Upstream { body, .. }
             if body.contains("store_unavailable") || body.contains("store_mode_unsupported")
     )
+}
+
+/// Fetch ArcGIS REST feature hits for `query` as `newEvidence` items. Reads the
+/// comma-separated `ARCGIS_REST_ENDPOINTS` env (per-tenant feature-layer URLs,
+/// e.g. the City of Flint GIS parcel layer) and queries each with the universal
+/// free-text `text=` param. Keyless. Best-effort: unset env or any error yields
+/// an empty Vec. ArcGIS returns failures as `200` + an `error` key, handled here.
+async fn fetch_arcgis_new_evidence(query: &str) -> Vec<Value> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let endpoints_raw = std::env::var("ARCGIS_REST_ENDPOINTS").unwrap_or_default();
+    let endpoints: Vec<&str> = endpoints_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .collect();
+    if endpoints.is_empty() {
+        return Vec::new();
+    }
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("CivicAtlas/1.0 (+https://ourcivicatlas.org)")
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            warn!(%err, "arcgis provider: client build failed");
+            return Vec::new();
+        }
+    };
+    let mut out: Vec<Value> = Vec::new();
+    for endpoint in endpoints {
+        let endpoint = endpoint.trim_end_matches('/');
+        let url = format!("{endpoint}/query");
+        let response = match client
+            .get(&url)
+            .query(&[
+                ("text", trimmed),
+                ("outFields", "*"),
+                ("returnGeometry", "false"),
+                ("outSR", "4326"),
+                ("resultRecordCount", "10"),
+                ("f", "json"),
+            ])
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => response,
+            Ok(response) => {
+                warn!(status = response.status().as_u16(), endpoint, "arcgis: non-2xx");
+                continue;
+            }
+            Err(err) => {
+                warn!(%err, endpoint, "arcgis: request failed");
+                continue;
+            }
+        };
+        let payload: Value = match response.json().await {
+            Ok(payload) => payload,
+            Err(err) => {
+                warn!(%err, endpoint, "arcgis: non-JSON body");
+                continue;
+            }
+        };
+        // ArcGIS reports layer errors as 200 + an `error` object.
+        if payload.get("error").is_some() {
+            warn!(endpoint, "arcgis: layer returned an error payload");
+            continue;
+        }
+        let Some(features) = payload.get("features").and_then(Value::as_array) else {
+            continue;
+        };
+        for feature in features {
+            let Some(attributes) = feature.get("attributes").and_then(Value::as_object) else {
+                continue;
+            };
+            let title = arcgis_pick_title(attributes);
+            if title.is_empty() {
+                continue;
+            }
+            let oid = attributes
+                .get("OBJECTID")
+                .or_else(|| attributes.get("OID"))
+                .and_then(|value| {
+                    value
+                        .as_i64()
+                        .map(|n| n.to_string())
+                        .or_else(|| value.as_str().map(String::from))
+                });
+            let hit_url = match oid {
+                Some(oid) if !oid.is_empty() => format!("{endpoint}/{oid}"),
+                _ => endpoint.to_string(),
+            };
+            out.push(json!({
+                "resultId": hit_url,
+                "kind": "arcgis_feature",
+                "label": title.chars().take(300).collect::<String>(),
+                "snippet": arcgis_snippet(attributes).chars().take(400).collect::<String>(),
+                "relevanceScore": 0.0,
+                "confidence": 0.7,
+                "source": "arcgis_rest",
+                "url": hit_url,
+                "closesGapId": "",
+            }));
+        }
+    }
+    out
+}
+
+/// Pick a human title from ArcGIS feature attributes (layers vary in schema).
+fn arcgis_pick_title(attributes: &serde_json::Map<String, Value>) -> String {
+    for key in [
+        "NAME", "Name", "name", "BUILDING_NAME", "Building_Name", "ADDRESS", "Address",
+        "address", "SITE_ADDRESS", "SiteAddress", "site_address", "PARCEL_ID", "ParcelID",
+        "parcel_id", "PIN", "Pin", "pin", "STREETNAME", "StreetName", "street_name",
+    ] {
+        if let Some(value) = attributes.get(key) {
+            let text = arcgis_attr_str(value);
+            if !text.is_empty() {
+                return text;
+            }
+        }
+    }
+    String::new()
+}
+
+/// Compact snippet from the most useful ArcGIS attributes (max 4 fields).
+fn arcgis_snippet(attributes: &serde_json::Map<String, Value>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for key in [
+        "ADDRESS", "Address", "address", "STREETNAME", "StreetName", "OWNER", "Owner",
+        "USE", "Use", "PROPCLASS", "PropClass", "YEAR_BUILT", "YearBuilt",
+    ] {
+        if parts.len() >= 4 {
+            break;
+        }
+        if let Some(value) = attributes.get(key) {
+            let text = arcgis_attr_str(value);
+            if !text.is_empty() {
+                parts.push(text);
+            }
+        }
+    }
+    parts.join(" · ")
+}
+
+/// Coerce an ArcGIS attribute value (string or number) to a display string.
+fn arcgis_attr_str(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// Fetch OpenStreetMap building footprints in the query's spatial scope as
+/// `newEvidence` items. OSM Overpass is a STRUCTURED (spatial) provider: it
+/// fires only when `scope_json` carries a bbox (a parcel/area-scoped research
+/// query). Free-text queries with no bbox are skipped. Keyless. Best-effort:
+/// any error yields an empty Vec. Source: the public Overpass API.
+async fn fetch_osm_new_evidence(scope_json: &str) -> Vec<Value> {
+    let scope = ResearchScope::from_scope_json(scope_json);
+    let Some(bbox) = scope.bbox.as_ref() else {
+        return Vec::new();
+    };
+    // Overpass QL: buildings (ways) within the bbox (south,west,north,east).
+    let overpass_query = format!(
+        "[out:json][timeout:10];\n(\n  way[\"building\"]({},{},{},{});\n);\nout tags center;\n",
+        bbox.min_lat, bbox.min_lon, bbox.max_lat, bbox.max_lon
+    );
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .user_agent("CivicAtlas/1.0 (+https://ourcivicatlas.org)")
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            warn!(%err, "osm provider: client build failed");
+            return Vec::new();
+        }
+    };
+    let response = match client
+        .post("https://overpass-api.de/api/interpreter")
+        .form(&[("data", overpass_query.as_str())])
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => {
+            warn!(status = response.status().as_u16(), "osm: non-2xx");
+            return Vec::new();
+        }
+        Err(err) => {
+            warn!(%err, "osm: request failed");
+            return Vec::new();
+        }
+    };
+    let payload: Value = match response.json().await {
+        Ok(payload) => payload,
+        Err(err) => {
+            warn!(%err, "osm: non-JSON body");
+            return Vec::new();
+        }
+    };
+    let Some(elements) = payload.get("elements").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Value> = Vec::with_capacity(elements.len().min(25));
+    for element in elements.iter().take(25) {
+        let osm_type = element.get("type").and_then(Value::as_str).unwrap_or("");
+        let osm_id = element.get("id").and_then(Value::as_i64);
+        let (osm_type, osm_id) = match (osm_type, osm_id) {
+            (kind, Some(id)) if !kind.is_empty() => (kind, id),
+            _ => continue,
+        };
+        let tags = element.get("tags").and_then(Value::as_object);
+        let name = tags
+            .and_then(|tags| tags.get("name").or_else(|| tags.get("addr:housename")))
+            .and_then(Value::as_str)
+            .map(String::from)
+            .unwrap_or_else(|| format!("{osm_type} {osm_id}"));
+        let url = format!("https://www.openstreetmap.org/{osm_type}/{osm_id}");
+        out.push(json!({
+            "resultId": &url,
+            "kind": "osm_feature",
+            "label": name.chars().take(300).collect::<String>(),
+            "snippet": osm_snippet(tags).chars().take(400).collect::<String>(),
+            "relevanceScore": 0.0,
+            "confidence": 0.6,
+            "source": "osm_overpass",
+            "url": url,
+            "closesGapId": "",
+        }));
+    }
+    out
+}
+
+/// Compact snippet from OSM tags (building/historic/address/start_date), max 6.
+fn osm_snippet(tags: Option<&serde_json::Map<String, Value>>) -> String {
+    let Some(tags) = tags else {
+        return String::new();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for key in [
+        "building", "amenity", "historic", "addr:street", "addr:housenumber",
+        "start_date", "description",
+    ] {
+        if parts.len() >= 6 {
+            break;
+        }
+        if let Some(value) = tags.get(key).and_then(Value::as_str) {
+            if !value.is_empty() {
+                parts.push(format!("{key}={value}"));
+            }
+        }
+    }
+    parts.join(" · ")
 }
 
 /// Frontier crawl: seed RustyRed's live crawler from the URLs already in
