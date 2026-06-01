@@ -303,7 +303,15 @@ impl Client {
         let body = CrawlRequest {
             tenant: tenant_id.to_string(),
             seeds: seeds.to_vec(),
-            budget: Some(CrawlBudget { max_pages }),
+            budget: Some(CrawlBudget {
+                max_pages,
+                // Tight bounds: the crawl runs inline in a per-query research
+                // call, so cap wall-clock, depth, and bytes to keep latency
+                // bounded. All four fields are required by RustyRed.
+                max_seconds: 12,
+                max_depth: 1,
+                max_bytes: 2 * 1024 * 1024,
+            }),
         };
         let response = self.http.post(&url).json(&body).send().await?;
         if !response.status().is_success() {
@@ -538,11 +546,16 @@ pub struct CrawlRequest {
     pub budget: Option<CrawlBudget>,
 }
 
-/// Crawl budget. Matches RustyRed's `CrawlBudget` (defaults to 25 pages on the
-/// server when omitted).
+/// Crawl budget. Matches RustyRed's `CrawlBudget`: ALL FOUR fields are required
+/// server-side (no serde defaults), so omitting any one yields a `422`. When the
+/// whole `budget` is omitted from the request body RustyRed applies its own
+/// defaults (25 pages / 30s / depth 2 / 5 MB).
 #[derive(Debug, Clone, Serialize)]
 pub struct CrawlBudget {
     pub max_pages: usize,
+    pub max_seconds: u64,
+    pub max_depth: usize,
+    pub max_bytes: usize,
 }
 
 /// Body of the crawl response. RustyRed returns
