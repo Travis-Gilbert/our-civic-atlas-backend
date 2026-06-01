@@ -1116,11 +1116,17 @@ async fn fetch_arcgis_new_evidence(query: &str) -> Vec<Value> {
 }
 
 /// Pick a human title from ArcGIS feature attributes (layers vary in schema).
+/// Covers common municipal parcel columns including the City of Flint layer
+/// (`Full_Prop` = full property address), then falls back to the first non-empty
+/// string attribute so a feature is NEVER dropped just because its schema is
+/// unfamiliar (the original list only had generic names and silently skipped
+/// every Flint parcel).
 fn arcgis_pick_title(attributes: &serde_json::Map<String, Value>) -> String {
     for key in [
-        "NAME", "Name", "name", "BUILDING_NAME", "Building_Name", "ADDRESS", "Address",
-        "address", "SITE_ADDRESS", "SiteAddress", "site_address", "PARCEL_ID", "ParcelID",
-        "parcel_id", "PIN", "Pin", "pin", "STREETNAME", "StreetName", "street_name",
+        "Full_Prop", "FULL_PROP", "NAME", "Name", "name", "BUILDING_NAME", "Building_Name",
+        "ADDRESS", "Address", "address", "Prop_Add", "SITE_ADDRESS", "SiteAddress",
+        "site_address", "Prop_Stree", "STREETNAME", "StreetName", "street_name", "PARCEL_ID",
+        "ParcelID", "parcel_id", "PIDdash", "PIDText", "PIN", "Pin", "pin",
     ] {
         if let Some(value) = attributes.get(key) {
             let text = arcgis_attr_str(value);
@@ -1129,15 +1135,34 @@ fn arcgis_pick_title(attributes: &serde_json::Map<String, Value>) -> String {
             }
         }
     }
+    // Fallback: first non-empty string attribute (skip shape/id housekeeping) so
+    // an unfamiliar layer's feature still gets a label instead of being skipped.
+    for (key, value) in attributes {
+        if key.starts_with("Shape")
+            || key.eq_ignore_ascii_case("objectid")
+            || key.eq_ignore_ascii_case("oid")
+            || key.eq_ignore_ascii_case("fid")
+        {
+            continue;
+        }
+        if let Value::String(text) = value {
+            if !text.is_empty() {
+                return text.clone();
+            }
+        }
+    }
     String::new()
 }
 
 /// Compact snippet from the most useful ArcGIS attributes (max 4 fields).
+/// Owner / use / class / year first (the useful supplementary info, since the
+/// title is usually the address), covering the City of Flint columns plus the
+/// generic equivalents on other layers.
 fn arcgis_snippet(attributes: &serde_json::Map<String, Value>) -> String {
     let mut parts: Vec<String> = Vec::new();
     for key in [
-        "ADDRESS", "Address", "address", "STREETNAME", "StreetName", "OWNER", "Owner",
-        "USE", "Use", "PROPCLASS", "PropClass", "YEAR_BUILT", "YearBuilt",
+        "Tx_PayName", "OWNER", "Owner", "Use_Type", "USE", "Use", "Prop_Class", "PROPCLASS",
+        "PropClass", "Year_Built", "YEAR_BUILT", "YearBuilt", "Prop_Add", "ADDRESS", "Address",
     ] {
         if parts.len() >= 4 {
             break;
