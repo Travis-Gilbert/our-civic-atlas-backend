@@ -940,6 +940,57 @@ fn is_rustyred_store_unavailable(err: &RustyRedError) -> bool {
     )
 }
 
+/// Address-suffix + redundant-geo stop-words dropped from ArcGIS query tokens.
+/// Street types are dropped because the parcel data abbreviates them ("ST", not
+/// "STREET"), so a literal LIKE on the spelled-out word would miss; the city /
+/// state are dropped because the layer is already Flint-scoped.
+const ARCGIS_STOPWORDS: &[&str] = &[
+    "flint", "michigan", "mi", "usa", "street", "st", "avenue", "ave", "road", "rd", "drive",
+    "dr", "lane", "ln", "boulevard", "blvd", "court", "ct", "place", "pl", "circle", "cir",
+    "way", "terrace", "ter", "highway", "hwy", "parkway", "pkwy", "n", "s", "e", "w", "north",
+    "south", "east", "west",
+];
+
+/// Build a portable ArcGIS WHERE clause from a free-text query. Tokenizes the
+/// query, drops stop-words, and ANDs the remaining meaningful tokens (each
+/// matching ANY field via OR). So "Saginaw Street Flint Michigan" reduces to
+/// just "saginaw" and matches records like "2513 N SAGINAW ST", instead of
+/// requiring the whole phrase as one substring (which never matches). Falls back
+/// to a whole-query LIKE when every token is a stop-word, and to `1=0` when no
+/// fields are configured. All literals are single-quote-escaped.
+fn arcgis_where_clause(query: &str, fields: &[&str]) -> String {
+    if fields.is_empty() {
+        return "1=0".to_string();
+    }
+    let any_field = |needle: &str| -> String {
+        let esc = needle.replace('\'', "''");
+        let ors = fields
+            .iter()
+            .map(|field| format!("UPPER({field}) LIKE UPPER('%{esc}%')"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        format!("({ors})")
+    };
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .map(|token| {
+            token
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|token| token.len() >= 2 && !ARCGIS_STOPWORDS.contains(&token.as_str()))
+        .collect();
+    if tokens.is_empty() {
+        any_field(query.trim())
+    } else {
+        tokens
+            .iter()
+            .map(|token| any_field(token))
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    }
+}
+
 /// Fetch ArcGIS REST feature hits for `query` as `newEvidence` items. Reads the
 /// comma-separated `ARCGIS_REST_ENDPOINTS` env (per-tenant feature-layer URLs,
 /// e.g. the City of Flint GIS parcel layer) and queries each with the universal
@@ -979,21 +1030,12 @@ async fn fetch_arcgis_new_evidence(query: &str) -> Vec<Value> {
     // string literal.
     let fields_raw = std::env::var("ARCGIS_SEARCH_FIELDS")
         .unwrap_or_else(|_| "Full_Prop,Prop_Stree,Tx_PayName".to_string());
-    let escaped = trimmed.replace('\'', "''");
-    let where_clause = {
-        let clause = fields_raw
-            .split(',')
-            .map(str::trim)
-            .filter(|field| !field.is_empty())
-            .map(|field| format!("UPPER({field}) LIKE UPPER('%{escaped}%')"))
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        if clause.is_empty() {
-            "1=0".to_string()
-        } else {
-            clause
-        }
-    };
+    let fields: Vec<&str> = fields_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+        .collect();
+    let where_clause = arcgis_where_clause(trimmed, &fields);
     let mut out: Vec<Value> = Vec::new();
     for endpoint in endpoints {
         let endpoint = endpoint.trim_end_matches('/');
@@ -1252,17 +1294,43 @@ async fn append_frontier_crawl(tenant: &str, query: &str, new_evidence: &mut Vec
     if let Err(err) = client.crawl(tenant, &seeds, 8).await {
         warn!(%err, "frontier crawl failed; continuing with provider hits");
     }
+    // Build a url -> rich label map from the provider hits (LoC etc.) so a
+    // crawled page re-fetched from a provider URL gets the provider's real title
+    // instead of RustyRed's URL-derived id. Keyed scheme-insensitively (LoC emits
+    // http, the crawler may canonicalize to https).
+    let provider_titles: std::collections::HashMap<String, String> = new_evidence
+        .iter()
+        .filter_map(|item| {
+            let url = item.get("url").and_then(Value::as_str)?;
+            let label = item.get("label").and_then(Value::as_str)?;
+            Some((normalize_url_key(url), label.to_string()))
+        })
+        .collect();
     // Read the crawl substrate for the query; append crawled-page hits.
     match client.serp_search(tenant, query).await {
         Ok(serp) => {
             for hit in &serp.search.hits {
-                if let Some(item) = serp_hit_to_evidence(hit) {
+                if let Some(mut item) = serp_hit_to_evidence(hit) {
+                    if let Some(url) = item.get("url").and_then(Value::as_str).map(String::from) {
+                        if let Some(label) = provider_titles.get(&normalize_url_key(&url)) {
+                            item["label"] = json!(label);
+                        }
+                    }
                     new_evidence.push(item);
                 }
             }
         }
         Err(err) => warn!(%err, "frontier serp read failed"),
     }
+}
+
+/// Normalize a URL to a scheme-insensitive, trailing-slash-insensitive key, for
+/// matching crawled hits back to provider hits by URL.
+fn normalize_url_key(url: &str) -> String {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_lowercase()
 }
 
 /// Map a RustyRed crawl-substrate hit (loose JSON) into a `newEvidence` item,
