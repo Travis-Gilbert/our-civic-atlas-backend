@@ -514,6 +514,7 @@ dependencies = [
  "civic-atlas-reconstruction-engine",
  "civic-atlas-types",
  "prost",
+ "reqwest",
  "rustyred-client",
  "serde",
  "serde_json",

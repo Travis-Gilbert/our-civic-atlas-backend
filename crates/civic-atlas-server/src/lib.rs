@@ -274,6 +274,15 @@ impl CivicAtlasService for CivicAtlasGrpcService {
             .map_err(|err| Status::unauthenticated(err.to_string()))?;
         let query = request.query.clone();
 
+        // newEvidence: live provider fanout (keyless public APIs), independent
+        // of the RustyRed graph read below. Runs even when the graph is empty,
+        // so a research query returns fresh sources instead of nothing.
+        // Best-effort: a provider error yields an empty list, never fails the
+        // call. Library of Congress is the first provider (free-text, keyless);
+        // ArcGIS REST + OSM Overpass follow. Computed up front so every return
+        // path (unconfigured, store-unavailable, success) can carry it.
+        let new_evidence = fetch_loc_new_evidence(&query).await;
+
         // Reach RustyRed via env construction per-call. The expected usage
         // pattern is one call per user research query (low rate, long
         // tail), so the per-call client build is acceptable; if call
@@ -302,7 +311,10 @@ impl CivicAtlasService for CivicAtlasGrpcService {
                 //
                 // provenanceRootId empty + synthetic run_id: provenance
                 // graph rooting belongs to the Theorem epistemic slice.
-                return Ok(Response::new(rustyred_unconfigured_response(&query)));
+                return Ok(Response::new(rustyred_unconfigured_response(
+                    &query,
+                    new_evidence.clone(),
+                )));
             }
             Err(err) => {
                 return Err(Status::unavailable(format!(
@@ -339,7 +351,10 @@ impl CivicAtlasService for CivicAtlasGrpcService {
         let ft = match rustyred.fulltext_search(tenant.as_str(), &ft_req).await {
             Ok(ft) => ft,
             Err(err) if is_rustyred_store_unavailable(&err) => {
-                return Ok(Response::new(rustyred_unconfigured_response(&query)));
+                return Ok(Response::new(rustyred_unconfigured_response(
+                    &query,
+                    new_evidence.clone(),
+                )));
             }
             Err(err) => {
                 return Err(Status::internal(format!(
@@ -433,7 +448,7 @@ impl CivicAtlasService for CivicAtlasGrpcService {
                 "degraded": false,
             },
             "priorKnowledge": prior_knowledge,
-            "newEvidence": [],
+            "newEvidence": new_evidence,
             "gapClosures": [],
             "provenanceRootId": "",
         }))
@@ -698,21 +713,36 @@ impl ResearchScope {
     }
 }
 
-/// Build the calm "research sources are not connected yet" response. Used both
-/// when `RUSTYRED_URL` is unset (`RustyRedError::Config`) and when RustyRed
-/// reports its fulltext store is unavailable for this tenant: RustyRed returns
-/// an error (not an empty set) when no `(label, property)` is designated yet
-/// AND when a search matches nothing, so both are a not-wired empty state, not
-/// a 500. `degraded: true` plus the `rustyred_unconfigured` gapClosure tells
-/// the Node sidecar to render "Research sources are not connected yet".
-fn rustyred_unconfigured_response(query: &str) -> CivicResearchResponse {
+/// Build the response for a research query whose RustyRed graph read produced
+/// nothing usable: `RUSTYRED_URL` unset (`RustyRedError::Config`) or RustyRed
+/// reporting its fulltext store unavailable for this tenant (no `(label,
+/// property)` designation yet, or a zero-result search; RustyRed returns an
+/// error for both, not an empty set). `priorKnowledge` is empty, but
+/// `new_evidence` (the live provider fanout) is carried through, so a query
+/// still returns fresh sources when the graph is empty. `degraded: true`
+/// reflects the empty graph read. The `rustyred_unconfigured` gapClosure is
+/// emitted ONLY when there is no provider evidence either: with evidence
+/// present the sources ARE connected, just not the graph.
+fn rustyred_unconfigured_response(query: &str, new_evidence: Vec<Value>) -> CivicResearchResponse {
     let run_id = format!("civic-atlas:{}", Uuid::new_v4());
+    let total = new_evidence.len();
+    let has_evidence = total > 0;
+    let gap_closures: Vec<Value> = if has_evidence {
+        Vec::new()
+    } else {
+        vec![json!({
+            "gapId": "rustyred_unconfigured",
+            "description": "rustyred_unconfigured: research sources are not connected yet",
+            "closed": false,
+            "evidenceCount": 0,
+        })]
+    };
     let results_json = serde_json::to_string(&json!({
         "query": query,
         "runId": &run_id,
-        "totalReturned": 0,
-        "totalAdmitted": 0,
-        "roundsExecuted": 0,
+        "totalReturned": total,
+        "totalAdmitted": total,
+        "roundsExecuted": if has_evidence { 1 } else { 0 },
         "latencyMs": 0,
         "metadata": {
             "mode": "civic_atlas",
@@ -721,13 +751,8 @@ fn rustyred_unconfigured_response(query: &str) -> CivicResearchResponse {
             "degraded": true,
         },
         "priorKnowledge": [],
-        "newEvidence": [],
-        "gapClosures": [json!({
-            "gapId": "rustyred_unconfigured",
-            "description": "rustyred_unconfigured: research sources are not connected yet",
-            "closed": false,
-            "evidenceCount": 0,
-        })],
+        "newEvidence": new_evidence,
+        "gapClosures": gap_closures,
         "provenanceRootId": "",
     }))
     .unwrap_or_else(|_| String::from("{}"));
@@ -736,6 +761,151 @@ fn rustyred_unconfigured_response(query: &str) -> CivicResearchResponse {
         skill: String::from("civic_atlas"),
         results_json,
     }
+}
+
+/// Fetch Library of Congress catalog hits for `query` as `newEvidence` items.
+/// Keyless public JSON API (`loc.gov/search/?fo=json`): HABS/HAER surveys,
+/// Sanborn maps, photo collections, etc. Best-effort: any error (network,
+/// non-2xx, non-JSON, missing fields) yields an empty Vec and never fails
+/// `civic_research`. Item keys mirror `project_fulltext_hit` so the Node
+/// sidecar folds them into `sources`/`signals` with no frontend change.
+async fn fetch_loc_new_evidence(query: &str) -> Vec<Value> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .user_agent("CivicAtlas/1.0 (+https://ourcivicatlas.org)")
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            warn!(%err, "loc provider: client build failed");
+            return Vec::new();
+        }
+    };
+    let response = match client
+        .get("https://www.loc.gov/search/")
+        .query(&[("q", trimmed), ("fo", "json"), ("c", "12")])
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => {
+            warn!(status = response.status().as_u16(), "loc provider: non-2xx");
+            return Vec::new();
+        }
+        Err(err) => {
+            warn!(%err, "loc provider: request failed");
+            return Vec::new();
+        }
+    };
+    let payload: Value = match response.json().await {
+        Ok(payload) => payload,
+        Err(err) => {
+            warn!(%err, "loc provider: non-JSON body");
+            return Vec::new();
+        }
+    };
+    let Some(results) = payload.get("results").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Value> = Vec::with_capacity(results.len());
+    for result in results {
+        let url = loc_pick_url(result);
+        if url.is_empty() {
+            continue;
+        }
+        let title = loc_stringify(result.get("title"));
+        if title.is_empty() {
+            continue;
+        }
+        let partof = loc_stringify(result.get("partof"));
+        let snippet = loc_stringify(result.get("description"));
+        out.push(json!({
+            "resultId": loc_stringify(result.get("id")),
+            "kind": loc_source_type(&partof),
+            "label": loc_truncate(&title, 300),
+            "snippet": loc_truncate(&snippet, 400),
+            "relevanceScore": 0.0,
+            "confidence": 0.85,
+            "source": "library_of_congress",
+            "url": url,
+            "closesGapId": "",
+        }));
+    }
+    out
+}
+
+/// Canonical landing URL for a LoC result: prefer `id` (a full URL), fall back
+/// to the first `url` resource. Empty string when neither is http(s).
+fn loc_pick_url(result: &Value) -> String {
+    if let Some(primary) = result.get("id").and_then(Value::as_str) {
+        if primary.starts_with("http") {
+            return primary.to_string();
+        }
+    }
+    if let Some(first) = result
+        .get("url")
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.first())
+        .and_then(Value::as_str)
+    {
+        if first.starts_with("http") {
+            return first.to_string();
+        }
+    }
+    String::new()
+}
+
+/// LoC fields are sometimes a string, sometimes a list of strings, sometimes a
+/// `{value|name|label: ...}` object. Coerce to a single display string.
+fn loc_stringify(value: Option<&Value>) -> String {
+    match value {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter(|item| !item.is_null())
+            .map(|item| loc_stringify(Some(item)))
+            .collect::<Vec<_>>()
+            .join(", "),
+        Some(Value::Object(obj)) => {
+            for key in ["value", "name", "label"] {
+                if let Some(inner) = obj.get(key) {
+                    return loc_stringify(Some(inner));
+                }
+            }
+            Value::Object(obj.clone()).to_string()
+        }
+        Some(other) => other.to_string(),
+    }
+}
+
+/// Map a LoC `partof` collection string to a civic-meaningful source kind.
+fn loc_source_type(partof: &str) -> &'static str {
+    let lower = partof.to_lowercase();
+    if lower.contains("sanborn") {
+        "loc_sanborn_map"
+    } else if lower.contains("historic american") {
+        "loc_habs_haer"
+    } else if lower.contains("photograph") {
+        "loc_photograph"
+    } else if lower.contains("panoramic") {
+        "loc_panoramic"
+    } else if lower.contains("newspaper") {
+        "loc_newspaper"
+    } else if lower.contains("map") {
+        "loc_map"
+    } else {
+        "loc_item"
+    }
+}
+
+/// Truncate to at most `max` chars on a char boundary (LoC titles can be long).
+fn loc_truncate(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
 }
 
 /// True when a RustyRed error means the fulltext store is not usable for this
