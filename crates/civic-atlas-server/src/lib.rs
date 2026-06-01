@@ -970,6 +970,30 @@ async fn fetch_arcgis_new_evidence(query: &str) -> Vec<Value> {
             return Vec::new();
         }
     };
+    // Free-text via a WHERE LIKE across configurable string fields. ArcGIS
+    // layers vary: the universal `text=` param is NOT supported by all of them
+    // (the Flint parcel layer rejects it with "Invalid query parameters"), so
+    // build a portable WHERE. Fields default to the Flint parcel address/owner
+    // columns and are overridable via `ARCGIS_SEARCH_FIELDS` so other layers
+    // are not hardcoded wrong. The query is single-quote-escaped for the SQL
+    // string literal.
+    let fields_raw = std::env::var("ARCGIS_SEARCH_FIELDS")
+        .unwrap_or_else(|_| "Full_Prop,Prop_Stree,Tx_PayName".to_string());
+    let escaped = trimmed.replace('\'', "''");
+    let where_clause = {
+        let clause = fields_raw
+            .split(',')
+            .map(str::trim)
+            .filter(|field| !field.is_empty())
+            .map(|field| format!("UPPER({field}) LIKE UPPER('%{escaped}%')"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        if clause.is_empty() {
+            "1=0".to_string()
+        } else {
+            clause
+        }
+    };
     let mut out: Vec<Value> = Vec::new();
     for endpoint in endpoints {
         let endpoint = endpoint.trim_end_matches('/');
@@ -977,7 +1001,7 @@ async fn fetch_arcgis_new_evidence(query: &str) -> Vec<Value> {
         let response = match client
             .get(&url)
             .query(&[
-                ("text", trimmed),
+                ("where", where_clause.as_str()),
                 ("outFields", "*"),
                 ("returnGeometry", "false"),
                 ("outSR", "4326"),
