@@ -284,6 +284,57 @@ impl Client {
         }
         Ok(response.json().await?)
     }
+
+    /// `POST /crawl`. Submit seed URLs for a live frontier crawl. RustyRed
+    /// fetches each seed, expands its link frontier, and commits the crawled
+    /// `Page`/`ContentSnapshot`/`Domain` nodes into `tenant_id`'s graph: the
+    /// acquisition path that populates RustyRed (and, downstream, Postgres).
+    /// `/crawl` is root-level; the tenant rides in the body. Requires the
+    /// `graph:write` scope on the bearer; a token without it gets a 403
+    /// surfaced as [`RustyRedError::Upstream`] (callers treat crawl as
+    /// best-effort and continue).
+    pub async fn crawl(
+        &self,
+        tenant_id: &str,
+        seeds: &[String],
+        max_pages: usize,
+    ) -> Result<CrawlResponse, RustyRedError> {
+        let url = format!("{}/crawl", self.config.base_url);
+        let body = CrawlRequest {
+            tenant: tenant_id.to_string(),
+            seeds: seeds.to_vec(),
+            budget: Some(CrawlBudget { max_pages }),
+        };
+        let response = self.http.post(&url).json(&body).send().await?;
+        if !response.status().is_success() {
+            return Err(make_upstream_error(response, "/crawl").await);
+        }
+        Ok(response.json().await?)
+    }
+
+    /// `GET /search.json?q=`. Read the crawl substrate (the `Page` graph the
+    /// crawler builds) for `query`. Unlike [`Client::fulltext_search`], this
+    /// needs NO `(label, property)` designation: it searches crawled pages
+    /// directly, so it surfaces freshly crawled content immediately. Root-
+    /// level; `tenant` rides as a query param so the read is tenant-scoped
+    /// (confirm RustyRed honors it; otherwise it reads the default substrate).
+    pub async fn serp_search(
+        &self,
+        tenant_id: &str,
+        query: &str,
+    ) -> Result<SerpResponse, RustyRedError> {
+        let url = format!("{}/search.json", self.config.base_url);
+        let response = self
+            .http
+            .get(&url)
+            .query(&[("q", query), ("tenant", tenant_id)])
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(make_upstream_error(response, "/search.json").await);
+        }
+        Ok(response.json().await?)
+    }
 }
 
 /// `GET /health` response.
@@ -473,6 +524,69 @@ pub struct NodeRecord {
     pub labels: Vec<String>,
     #[serde(default)]
     pub properties: serde_json::Map<String, Value>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// Body of the crawl request (`POST /crawl`). Matches RustyRed's
+/// `CrawlRouteBody`. `/crawl` is root-level so the tenant rides in the body.
+#[derive(Debug, Clone, Serialize)]
+pub struct CrawlRequest {
+    pub tenant: String,
+    pub seeds: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget: Option<CrawlBudget>,
+}
+
+/// Crawl budget. Matches RustyRed's `CrawlBudget` (defaults to 25 pages on the
+/// server when omitted).
+#[derive(Debug, Clone, Serialize)]
+pub struct CrawlBudget {
+    pub max_pages: usize,
+}
+
+/// Body of the crawl response. RustyRed returns
+/// `{ ok, tenant, receipt, transaction, federation }`; the receipt fields ride
+/// on `extra` for forward compatibility.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CrawlResponse {
+    #[serde(default = "default_true")]
+    pub ok: bool,
+    #[serde(default)]
+    pub tenant: Option<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// Body of the SERP response (`GET /search.json`). RustyRed returns
+/// `{ ok, tenant, search: { hits, links, matched_count, kept_count, query } }`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SerpResponse {
+    #[serde(default = "default_true")]
+    pub ok: bool,
+    #[serde(default)]
+    pub tenant: Option<String>,
+    #[serde(default)]
+    pub search: SerpSearch,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// The `search` block of a SERP response. `hits` are kept loose (`Value`) since
+/// the crawl-substrate hit shape varies; callers map url/title/snippet keys
+/// best-effort.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SerpSearch {
+    #[serde(default)]
+    pub hits: Vec<Value>,
+    #[serde(default)]
+    pub links: Vec<Value>,
+    #[serde(default)]
+    pub matched_count: usize,
+    #[serde(default)]
+    pub kept_count: usize,
+    #[serde(default)]
+    pub query: String,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
 }

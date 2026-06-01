@@ -281,7 +281,15 @@ impl CivicAtlasService for CivicAtlasGrpcService {
         // call. Library of Congress is the first provider (free-text, keyless);
         // ArcGIS REST + OSM Overpass follow. Computed up front so every return
         // path (unconfigured, store-unavailable, success) can carry it.
-        let new_evidence = fetch_loc_new_evidence(&query).await;
+        let mut new_evidence = fetch_loc_new_evidence(&query).await;
+
+        // Frontier crawl: seed RustyRed's crawler from the provider URLs, then
+        // read the crawl substrate back. RustyRed fetches the seeds live,
+        // expands its link frontier, and commits crawled pages into the tenant
+        // graph (acquisition that feeds RustyRed -> Postgres). Best-effort: any
+        // failure (unconfigured, missing graph:write scope, slow crawl) is
+        // logged and skipped; civic_research still returns the provider hits.
+        append_frontier_crawl(tenant.as_str(), &query, &mut new_evidence).await;
 
         // Reach RustyRed via env construction per-call. The expected usage
         // pattern is one call per user research query (low rate, long
@@ -919,6 +927,80 @@ fn is_rustyred_store_unavailable(err: &RustyRedError) -> bool {
         RustyRedError::Upstream { body, .. }
             if body.contains("store_unavailable") || body.contains("store_mode_unsupported")
     )
+}
+
+/// Frontier crawl: seed RustyRed's live crawler from the URLs already in
+/// `new_evidence` (the provider hits), then read the crawl substrate back and
+/// append the crawled-page hits. RustyRed fetches the seeds, expands its link
+/// frontier, and commits crawled pages into `tenant`'s graph: the acquisition
+/// path that populates RustyRed (and downstream Postgres). Entirely
+/// best-effort: unconfigured RustyRed, a token without `graph:write`, a slow
+/// crawl, or a SERP miss are all logged and skipped, leaving the provider hits
+/// intact. A small page budget keeps per-query latency bounded.
+async fn append_frontier_crawl(tenant: &str, query: &str, new_evidence: &mut Vec<Value>) {
+    let seeds: Vec<String> = new_evidence
+        .iter()
+        .filter_map(|item| item.get("url").and_then(Value::as_str))
+        .filter(|url| url.starts_with("http"))
+        .take(5)
+        .map(String::from)
+        .collect();
+    if seeds.is_empty() {
+        return;
+    }
+    let client = match RustyRedClient::from_env() {
+        Ok(client) => client,
+        // Unconfigured RustyRed: provider hits are already present; no frontier.
+        Err(_) => return,
+    };
+    // Crawl the seeds into the tenant graph (best-effort, bounded budget).
+    if let Err(err) = client.crawl(tenant, &seeds, 8).await {
+        warn!(%err, "frontier crawl failed; continuing with provider hits");
+    }
+    // Read the crawl substrate for the query; append crawled-page hits.
+    match client.serp_search(tenant, query).await {
+        Ok(serp) => {
+            for hit in &serp.search.hits {
+                if let Some(item) = serp_hit_to_evidence(hit) {
+                    new_evidence.push(item);
+                }
+            }
+        }
+        Err(err) => warn!(%err, "frontier serp read failed"),
+    }
+}
+
+/// Map a RustyRed crawl-substrate hit (loose JSON) into a `newEvidence` item,
+/// mirroring `project_fulltext_hit`'s key set. Probes the common
+/// url/title/snippet/score keys; returns `None` for a hit without a usable URL.
+fn serp_hit_to_evidence(hit: &Value) -> Option<Value> {
+    let url = hit.get("url").and_then(Value::as_str).unwrap_or("");
+    if url.is_empty() {
+        return None;
+    }
+    let title = hit
+        .get("title")
+        .and_then(Value::as_str)
+        .or_else(|| hit.get("label").and_then(Value::as_str))
+        .unwrap_or(url);
+    let snippet = hit
+        .get("snippet")
+        .and_then(Value::as_str)
+        .or_else(|| hit.get("excerpt").and_then(Value::as_str))
+        .or_else(|| hit.get("text").and_then(Value::as_str))
+        .unwrap_or("");
+    let score = hit.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+    Some(json!({
+        "resultId": url,
+        "kind": "web_page",
+        "label": title.chars().take(300).collect::<String>(),
+        "snippet": snippet.chars().take(400).collect::<String>(),
+        "relevanceScore": score,
+        "confidence": 0.5,
+        "source": "rustyred_crawl",
+        "url": url,
+        "closesGapId": "",
+    }))
 }
 
 /// Project a single RustyRed full-text hit (plus its hydrated node, when
