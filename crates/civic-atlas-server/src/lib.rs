@@ -3,6 +3,7 @@ pub mod event_planner;
 pub mod event_planner_auth;
 pub mod fixture;
 pub mod reconstruction;
+mod research_providers;
 pub mod tenant_db;
 pub mod validation;
 
@@ -259,11 +260,8 @@ impl CivicAtlasService for CivicAtlasGrpcService {
     ///
     /// Failure modes:
     /// - `Status::unauthenticated` when TenantContext is missing.
-    /// - Honest-empty `results_json` (with a `rustyred_unconfigured`
-    ///   gapClosure sentinel the sidecar renders as "Research sources are
-    ///   not connected yet") when `RUSTYRED_URL` is unset. This keeps the
-    ///   "backend not wired" state a calm empty state, not a network error.
-    /// - `Status::internal` when RustyRed is reachable but errors.
+    /// - RustyRed failures degrade the graph-read lane only. The live
+    ///   keyless provider lane still returns `newEvidence` when possible.
     async fn civic_research(
         &self,
         request: Request<CivicResearchRequest>,
@@ -273,72 +271,6 @@ impl CivicAtlasService for CivicAtlasGrpcService {
             .map_err(|err| Status::unauthenticated(err.to_string()))?;
         let query = request.query.clone();
 
-        // Reach RustyRed via env construction per-call. The expected usage
-        // pattern is one call per user research query (low rate, long
-        // tail), so the per-call client build is acceptable; if call
-        // volume grows, hold a long-lived `rustyred_client::Client` on
-        // `AtlasState`. The bearer lives server-side in the Axum process
-        // env (RUSTYRED_API_TOKEN) per the service-tier-auth rule.
-        //
-        // Unconfigured path: when RUSTYRED_URL is unset, `from_env`
-        // returns `RustyRedError::Config`. We do NOT hard-error the user;
-        // we emit an honest-empty results_json carrying a single
-        // `rustyred_unconfigured` gapClosure sentinel. The Node sidecar
-        // special-cases that token and renders "Research sources are not
-        // connected yet" instead of a network error.
-        let rustyred = match RustyRedClient::from_env() {
-            Ok(client) => client,
-            Err(RustyRedError::Config(_)) => {
-                // newEvidence empty: web-retrieval / source-paired new
-                // evidence is produced by the Theorem epistemic enrichment
-                // slice (next slice), not by the direct RustyRed graph
-                // read. Theorem is reserved for epistemics and is
-                // intentionally NOT in this search path.
-                //
-                // The only gapClosure we emit here is the
-                // rustyred_unconfigured sentinel; gap detection + closure
-                // is otherwise a Theorem epistemic-reasoning concern.
-                //
-                // provenanceRootId empty + synthetic run_id: provenance
-                // graph rooting belongs to the Theorem epistemic slice.
-                let run_id = format!("civic-atlas:{}", Uuid::new_v4());
-                let results_json = serde_json::to_string(&json!({
-                    "query": query,
-                    "runId": &run_id,
-                    "totalReturned": 0,
-                    "totalAdmitted": 0,
-                    "roundsExecuted": 0,
-                    "latencyMs": 0,
-                    "metadata": {
-                        "mode": "civic_atlas",
-                        "substrate": "rustyred",
-                        "searchService": "rustyred.graph.fulltext",
-                        "degraded": true,
-                    },
-                    "priorKnowledge": [],
-                    "newEvidence": [],
-                    "gapClosures": [json!({
-                        "gapId": "rustyred_unconfigured",
-                        "description": "rustyred_unconfigured: research sources are not connected yet",
-                        "closed": false,
-                        "evidenceCount": 0,
-                    })],
-                    "provenanceRootId": "",
-                }))
-                .unwrap_or_else(|_| String::from("{}"));
-                return Ok(Response::new(CivicResearchResponse {
-                    run_id,
-                    skill: String::from("civic_atlas"),
-                    results_json,
-                }));
-            }
-            Err(err) => {
-                return Err(Status::unavailable(format!(
-                    "civic research is unavailable: {err}"
-                )));
-            }
-        };
-
         // Parse optional scope hints from scope_json (proto field 4). The
         // current resolver previously ignored scope/budget entirely; we now
         // extract the searchable property, label, top_k, and an optional
@@ -346,95 +278,135 @@ impl CivicAtlasService for CivicAtlasGrpcService {
         // to an empty scope and run an unfiltered full-text search.
         let scope = ResearchScope::from_scope_json(&request.scope_json);
 
-        // (1) Full-text search over the designated (label, property) pair.
-        // RustyRed requires the pair to have been pre-designated via
-        // graph/fulltext/designate; an undesignated property returns empty.
-        // The property defaults to a civic searchable-text field and is
-        // overridable from scope_json so it is never hardcoded wrong.
-        let ft_req = FullTextSearchRequest {
-            label: scope.label.clone(),
-            property: scope.property.clone(),
-            query: query.clone(),
-            k: scope.top_k,
-        };
-        let ft = rustyred
-            .fulltext_search(tenant.as_str(), &ft_req)
-            .await
-            .map_err(|err| {
-                Status::internal(format!("rustyred fulltext search failed: {err}"))
-            })?;
+        // Reach RustyRed via env construction per-call. The expected usage
+        // pattern is one call per user research query (low rate, long
+        // tail), so the per-call client build is acceptable; if call
+        // volume grows, hold a long-lived `rustyred_client::Client` on
+        // `AtlasState`. The bearer lives server-side in the Axum process
+        // env (RUSTYRED_API_TOKEN) per the service-tier-auth rule.
+        //
+        // Unconfigured/degraded path: when RustyRed is not reachable, we
+        // keep `priorKnowledge` empty and explain the graph-read gap, but
+        // still fan out to keyless live-source providers below. That is
+        // what makes this a true "search the web" action instead of a
+        // graph-only lookup.
+        let mut prior_knowledge: Vec<Value> = Vec::new();
+        let mut gap_closures: Vec<Value> = Vec::new();
+        let mut rustyred_degraded = false;
+        let mut rustyred_status = "ok";
 
-        // (2) Optional spatial bbox intersection. RustyRed has no combined
-        // fulltext+spatial endpoint, so when scope_json carries a bbox we
-        // run a separate bounding-box search and keep only the full-text
-        // hits whose node_id also appears in the bbox node-id set. A
-        // spatial error (e.g. the label was never spatially designated)
-        // logs + skips the filter rather than blanking every bbox-scoped
-        // search to zero.
-        let mut hits = ft.results;
-        if let Some(bbox) = scope.bbox.as_ref() {
-            let bbox_req = SpatialBboxRequest {
-                label: scope.spatial_label.clone(),
-                lat_property: scope.lat_property.clone(),
-                lon_property: scope.lon_property.clone(),
-                min_lat: bbox.min_lat,
-                min_lon: bbox.min_lon,
-                max_lat: bbox.max_lat,
-                max_lon: bbox.max_lon,
-            };
-            match rustyred.spatial_bounding_box(tenant.as_str(), &bbox_req).await {
-                Ok(bbox_resp) => {
-                    let in_box: HashSet<String> = bbox_resp.node_ids.into_iter().collect();
-                    hits.retain(|hit| {
-                        hit.node_id
-                            .as_ref()
-                            .map(|id| in_box.contains(id))
-                            .unwrap_or(false)
-                    });
+        match RustyRedClient::from_env() {
+            Ok(rustyred) => {
+                // (1) Full-text search over the designated (label, property)
+                // pair. RustyRed requires the pair to have been designated
+                // via graph/fulltext/designate; an undesignated property
+                // returns empty.
+                let ft_req = FullTextSearchRequest {
+                    label: scope.label.clone(),
+                    property: scope.property.clone(),
+                    query: query.clone(),
+                    k: scope.top_k,
+                };
+                let mut hits = match rustyred.fulltext_search(tenant.as_str(), &ft_req).await {
+                    Ok(ft) => ft.results,
+                    Err(err) => {
+                        rustyred_degraded = true;
+                        rustyred_status = "rustyred_search_failed";
+                        warn!(%err, "rustyred fulltext search failed; continuing with live evidence");
+                        gap_closures.push(research_gap(
+                            "rustyred_search_failed",
+                            "rustyred_search_failed: graph search is unavailable; live source search still ran",
+                            false,
+                            0,
+                        ));
+                        Vec::new()
+                    }
+                };
+
+                // (2) Optional spatial bbox intersection. RustyRed has no
+                // combined fulltext+spatial endpoint, so when scope_json
+                // carries a bbox we run a separate bounding-box search and
+                // keep only the full-text hits whose node_id also appears
+                // in the bbox node-id set. A spatial error logs and skips
+                // the filter rather than blanking every bbox-scoped search.
+                if let Some(bbox) = scope.bbox.as_ref() {
+                    let bbox_req = SpatialBboxRequest {
+                        label: scope.spatial_label.clone(),
+                        lat_property: scope.lat_property.clone(),
+                        lon_property: scope.lon_property.clone(),
+                        min_lat: bbox.min_lat,
+                        min_lon: bbox.min_lon,
+                        max_lat: bbox.max_lat,
+                        max_lon: bbox.max_lon,
+                    };
+                    match rustyred
+                        .spatial_bounding_box(tenant.as_str(), &bbox_req)
+                        .await
+                    {
+                        Ok(bbox_resp) => {
+                            let in_box: HashSet<String> = bbox_resp.node_ids.into_iter().collect();
+                            hits.retain(|hit| {
+                                hit.node_id
+                                    .as_ref()
+                                    .map(|id| in_box.contains(id))
+                                    .unwrap_or(false)
+                            });
+                        }
+                        Err(err) => {
+                            warn!(%err, "rustyred spatial bbox search failed; skipping spatial filter");
+                        }
+                    }
                 }
-                Err(err) => {
-                    warn!(%err, "rustyred spatial bbox search failed; skipping spatial filter");
+
+                // (3) Hydrate the surviving hits into priorKnowledge. The
+                // full-text route returns only {node_id, score}, so we
+                // fetch each node and pull a human label/snippet/url from
+                // its properties. Hydration is best-effort and bounded to
+                // the top-k hits.
+                prior_knowledge.reserve(hits.len());
+                for hit in hits.iter().take(scope.top_k) {
+                    let node_id = match hit.node_id.as_deref() {
+                        Some(id) if !id.is_empty() => id,
+                        _ => continue,
+                    };
+                    let node = rustyred
+                        .get_node(tenant.as_str(), node_id)
+                        .await
+                        .ok()
+                        .and_then(|resp| resp.node);
+                    prior_knowledge.push(project_fulltext_hit(node_id, hit.score, node.as_ref()));
                 }
+            }
+            Err(RustyRedError::Config(_)) => {
+                rustyred_degraded = true;
+                rustyred_status = "rustyred_unconfigured";
+                gap_closures.push(research_gap(
+                    "rustyred_unconfigured",
+                    "rustyred_unconfigured: graph search is not connected yet; live source search still ran",
+                    false,
+                    0,
+                ));
+            }
+            Err(err) => {
+                rustyred_degraded = true;
+                rustyred_status = "rustyred_unavailable";
+                warn!(%err, "rustyred client unavailable; continuing with live evidence");
+                gap_closures.push(research_gap(
+                    "rustyred_unavailable",
+                    "rustyred_unavailable: graph search is unavailable; live source search still ran",
+                    false,
+                    0,
+                ));
             }
         }
 
-        // (3) Hydrate the surviving hits into priorKnowledge. The full-text
-        // route returns only {node_id, score}, so we fetch each node and
-        // pull a human label/snippet/url from its properties. Hydration is
-        // best-effort and bounded to the top-k hits; on a get_node error or
-        // a missing node we emit a minimal hit (label = node_id).
-        let mut prior_knowledge: Vec<Value> = Vec::with_capacity(hits.len());
-        for hit in hits.iter().take(scope.top_k) {
-            let node_id = match hit.node_id.as_deref() {
-                Some(id) if !id.is_empty() => id,
-                _ => continue,
-            };
-            let node = rustyred
-                .get_node(tenant.as_str(), node_id)
-                .await
-                .ok()
-                .and_then(|resp| resp.node);
-            prior_knowledge.push(project_fulltext_hit(node_id, hit.score, node.as_ref()));
-        }
+        let new_evidence = research_providers::discover_live_evidence(&query, scope.top_k).await;
 
-        let total = prior_knowledge.len();
-
-        // newEvidence stays empty: web-retrieval / source-paired new
-        // evidence is the Theorem epistemic enrichment slice (next slice),
-        // not the direct RustyRed graph read. Theorem is reserved for
-        // epistemics and is intentionally NOT in this search path.
-        //
-        // gapClosures stays empty in the configured path: gap detection +
-        // closure is a Theorem epistemic-reasoning concern (next slice).
-        //
         // provenanceRootId stays "" and run_id is a fresh synthetic uuid:
-        // provenance graph rooting belongs to the Theorem epistemic slice;
-        // the direct RustyRed read has no provenance root yet.
-        //
-        // metadata.degraded is false here because RustyRed returned (a
-        // possibly empty) hit set without error; it is true only on the
-        // unconfigured sentinel path above.
+        // provenance graph rooting belongs to the later review/admission
+        // slice; direct source discovery has no durable provenance root yet.
         let run_id = format!("civic-atlas:{}", Uuid::new_v4());
+        let total = prior_knowledge.len() + new_evidence.len();
         let results_json = serde_json::to_string(&json!({
             "query": query,
             "runId": &run_id,
@@ -445,12 +417,18 @@ impl CivicAtlasService for CivicAtlasGrpcService {
             "metadata": {
                 "mode": "civic_atlas",
                 "substrate": "rustyred",
-                "searchService": "rustyred.graph.fulltext",
-                "degraded": false,
+                "searchService": "rustyred.graph.fulltext+keyless.live_sources",
+                "degraded": rustyred_degraded,
+                "rustyredStatus": rustyred_status,
+                "liveSourceProviders": [
+                    "duckduckgo_html",
+                    "internet_archive",
+                    "library_of_congress"
+                ],
             },
             "priorKnowledge": prior_knowledge,
-            "newEvidence": [],
-            "gapClosures": [],
+            "newEvidence": new_evidence,
+            "gapClosures": gap_closures,
             "provenanceRootId": "",
         }))
         .unwrap_or_else(|_| String::from("{}"));
@@ -759,6 +737,15 @@ fn project_fulltext_hit(
         "source": source,
         "url": url,
         "closesGapId": "",
+    })
+}
+
+fn research_gap(gap_id: &str, description: &str, closed: bool, evidence_count: usize) -> Value {
+    json!({
+        "gapId": gap_id,
+        "description": description,
+        "closed": closed,
+        "evidenceCount": evidence_count,
     })
 }
 

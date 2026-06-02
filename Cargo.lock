@@ -307,6 +307,7 @@ dependencies = [
  "base64",
  "civic-atlas-types",
  "prost",
+ "reqwest",
  "rustyred-client",
  "serde",
  "serde_json",
