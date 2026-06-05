@@ -13,6 +13,7 @@
 
 use async_graphql::{MergedObject, Object};
 
+use crate::graphql::event_planner::EventPlannerQuery;
 use crate::graphql::reconstruction::ReconstructionQuery;
 
 pub struct CoreQuery;
@@ -28,7 +29,7 @@ impl CoreQuery {
 }
 
 #[derive(MergedObject, Default)]
-pub struct QueryRoot(CoreQuery, ReconstructionQuery);
+pub struct QueryRoot(CoreQuery, ReconstructionQuery, EventPlannerQuery);
 
 impl Default for CoreQuery {
     fn default() -> Self {
