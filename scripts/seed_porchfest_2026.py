@@ -16,11 +16,13 @@ The script:
   2. Resolves the tenant slug ("flint" by default) to a tenants.id uuid.
   3. Sets the per-session GUC `app.tenant_id` so the RLS policies in
      migration 0011 allow the inserts.
-  4. Deletes any prior event_layers row with (tenant_id, slug) matching
-     the fixture, cascading to its placements and tasks.
-  5. Inserts the fresh event_layer + placements.
+  4. Upserts the event_layers row for (tenant_id, slug), preserving its id.
+  5. Inserts any missing fixture placements keyed by `source_key`.
 
-Idempotent: running twice with the same fixture yields the same state.
+Idempotent: running twice with the same fixture inserts only missing seed rows.
+Existing fixture rows, planner-created rows, tasks, notes, and bookmarks are
+preserved. Pass --reset only when you intentionally want to delete the layer
+and all dependent planner state before reseeding.
 
 Requires the `psycopg` (psycopg3) library:
     pip install "psycopg[binary]"
@@ -37,15 +39,24 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-try:
+if TYPE_CHECKING:
     import psycopg
-except ImportError:  # pragma: no cover - install-time hint
-    sys.stderr.write(
-        "psycopg is required. Install with: pip install 'psycopg[binary]'\n"
-    )
-    raise
+
+
+SOURCE_KEY_PREFIX = "porchfest-fixture"
+
+
+def load_psycopg() -> Any:
+    try:
+        import psycopg
+    except ImportError:  # pragma: no cover - install-time hint
+        sys.stderr.write(
+            "psycopg is required. Install with: pip install 'psycopg[binary]'\n"
+        )
+        raise
+    return psycopg
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,6 +75,12 @@ def parse_args() -> argparse.Namespace:
         "--database-url",
         default=os.environ.get("DATABASE_URL"),
         help="Postgres connection URL. Defaults to the DATABASE_URL env var.",
+    )
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Delete the existing event layer and all dependent planner state "
+        "before reseeding. Default is non-destructive.",
     )
     return parser.parse_args()
 
@@ -103,24 +120,29 @@ def upsert_event_layer(
     cursor: psycopg.Cursor,
     tenant_id: str,
     layer: dict[str, Any],
+    *,
+    reset: bool,
 ) -> str:
     slug = layer["slug"]
     title = layer["title"]
     starts_at = layer.get("starts_at")
     ends_at = layer.get("ends_at")
 
-    # Delete and reinsert (rather than ON CONFLICT update) so the
-    # placements and tasks cascade-delete as a clean reset. Tasks are
-    # not written by Phase 1 but the cascade is harmless if a Phase 2
-    # task list exists when re-seeding.
-    cursor.execute(
-        "DELETE FROM event_layers WHERE tenant_id = %s AND slug = %s",
-        (tenant_id, slug),
-    )
+    if reset:
+        cursor.execute(
+            "DELETE FROM event_layers WHERE tenant_id = %s AND slug = %s",
+            (tenant_id, slug),
+        )
+
     cursor.execute(
         """
         INSERT INTO event_layers (tenant_id, slug, title, starts_at, ends_at)
         VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (tenant_id, slug) DO UPDATE
+          SET title = EXCLUDED.title,
+              starts_at = EXCLUDED.starts_at,
+              ends_at = EXCLUDED.ends_at,
+              updated_at = now()
         RETURNING id
         """,
         (tenant_id, slug, title, starts_at, ends_at),
@@ -130,42 +152,74 @@ def upsert_event_layer(
     return str(row[0])
 
 
+def seed_source_key(event_slug: str, index: int) -> str:
+    return f"{SOURCE_KEY_PREFIX}:{event_slug}:{index:03d}"
+
+
+def existing_seed_state(
+    cursor: psycopg.Cursor,
+    tenant_id: str,
+    event_layer_id: str,
+) -> tuple[int, int]:
+    cursor.execute(
+        """
+        SELECT
+          COUNT(*) FILTER (WHERE source_key IS NOT NULL),
+          COUNT(*) FILTER (WHERE source_key IS NULL)
+        FROM event_placements
+        WHERE tenant_id = %s AND event_layer_id = %s
+        """,
+        (tenant_id, event_layer_id),
+    )
+    row = cursor.fetchone()
+    assert row is not None
+    return int(row[0] or 0), int(row[1] or 0)
+
+
 def insert_placements(
     cursor: psycopg.Cursor,
     tenant_id: str,
     event_layer_id: str,
+    event_slug: str,
     placements: list[dict[str, Any]],
-) -> int:
+) -> tuple[int, int]:
     if not placements:
-        return 0
+        return 0, 0
 
-    # psycopg3's executemany is fine for ~hundreds of rows. If the
-    # corpus ever grows past a few thousand, switch to COPY.
-    cursor.executemany(
-        """
-        INSERT INTO event_placements (
-            tenant_id, event_layer_id, category, sublabel, label,
-            geometry, status, notes
-        ) VALUES (
-            %s, %s, %s, %s, %s,
-            ST_GeomFromGeoJSON(%s)::geography, %s, %s
-        )
-        """,
-        [
+    inserted = 0
+    skipped = 0
+    for index, placement in enumerate(placements):
+        cursor.execute(
+            """
+            INSERT INTO event_placements (
+                tenant_id, event_layer_id, category, sublabel, label,
+                geometry, status, notes, source_key
+            ) VALUES (
+                %s, %s, %s, %s, %s,
+                ST_GeomFromGeoJSON(%s)::geography, %s, %s, %s
+            )
+            ON CONFLICT (tenant_id, event_layer_id, source_key)
+              WHERE source_key IS NOT NULL
+              DO NOTHING
+            RETURNING id
+            """,
             (
                 tenant_id,
                 event_layer_id,
-                p["category"],
-                p.get("sublabel") or None,
-                p["label"],
-                json.dumps(p["geometry"]),
-                p.get("status") or "placed",
-                p.get("notes") or None,
-            )
-            for p in placements
-        ],
-    )
-    return len(placements)
+                placement["category"],
+                placement.get("sublabel") or None,
+                placement["label"],
+                json.dumps(placement["geometry"]),
+                placement.get("status") or "placed",
+                placement.get("notes") or None,
+                seed_source_key(event_slug, index),
+            ),
+        )
+        if cursor.fetchone() is None:
+            skipped += 1
+        else:
+            inserted += 1
+    return inserted, skipped
 
 
 def main() -> None:
@@ -174,6 +228,7 @@ def main() -> None:
         raise SystemExit(
             "DATABASE_URL is required (pass --database-url or set the env var)."
         )
+    psycopg_module = load_psycopg()
 
     fixture_path = Path(args.fixture).resolve()
     if not fixture_path.exists():
@@ -187,16 +242,47 @@ def main() -> None:
         f"Seeding tenant={args.tenant} layer={layer['slug']} "
         f"({len(placements)} placement(s)) from {fixture_path}",
     )
+    if args.reset:
+        print("Reset mode: deleting the existing layer and dependent planner state.")
 
-    with psycopg.connect(args.database_url, autocommit=False) as conn:
+    with psycopg_module.connect(args.database_url, autocommit=False) as conn:
         with conn.cursor() as cursor:
             tenant_id = resolve_tenant_id(cursor, args.tenant)
             set_tenant_session(cursor, tenant_id)
-            event_layer_id = upsert_event_layer(cursor, tenant_id, layer)
-            count = insert_placements(cursor, tenant_id, event_layer_id, placements)
+            event_layer_id = upsert_event_layer(
+                cursor,
+                tenant_id,
+                layer,
+                reset=args.reset,
+            )
+            keyed_count, unkeyed_count = existing_seed_state(
+                cursor,
+                tenant_id,
+                event_layer_id,
+            )
+            if not args.reset and keyed_count == 0 and unkeyed_count > 0:
+                raise SystemExit(
+                    f"Event layer {layer['slug']!r} already has "
+                    f"{unkeyed_count} unkeyed placement(s). This could be an "
+                    "older seed or live planner data, so the non-destructive "
+                    "seeder will not duplicate it. Re-run with --reset only "
+                    "if you intend to replace the layer, or reconcile the "
+                    "existing rows manually."
+                )
+            inserted, skipped = insert_placements(
+                cursor,
+                tenant_id,
+                event_layer_id,
+                layer["slug"],
+                placements,
+            )
         conn.commit()
 
-    print(f"Done. Inserted {count} placement(s) under event_layer {event_layer_id}.")
+    print(
+        "Done. "
+        f"Inserted {inserted} placement(s), skipped {skipped} existing "
+        f"placement(s) under event_layer {event_layer_id}."
+    )
 
 
 if __name__ == "__main__":
