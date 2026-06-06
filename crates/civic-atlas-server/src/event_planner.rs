@@ -53,6 +53,10 @@ use uuid::Uuid;
 
 use crate::AtlasState;
 
+pub const NO_LOGIN_PLANNER_ACTOR_ID: &str = "00000000-0000-4000-8000-000000000001";
+const NO_LOGIN_PLANNER_EMAIL: &str = "porchfest-crew@ourcivicatlas.local";
+const NO_LOGIN_PLANNER_DISPLAY_NAME: &str = "Porchfest Crew";
+
 #[derive(Clone)]
 pub struct EventPlannerGrpcService {
     state: AtlasState,
@@ -234,12 +238,11 @@ impl EventPlannerService for EventPlannerGrpcService {
         } else {
             req.status.trim()
         };
-        let actor_uuid = parse_uuid(&req.actor_user_id, "actor_user_id")?;
-
         let pool = self.pool()?;
         let mut tx = pool.begin().await.map_err(db_status)?;
         let tenant_id = resolve_tenant_id(&mut tx, tenant.as_str()).await?;
         set_transaction_tenant(&mut tx, tenant_id).await?;
+        let actor_uuid = resolve_actor_uuid(&mut tx, tenant_id, &req.actor_user_id).await?;
 
         let event_layer_id = resolve_event_layer_id(&mut tx, tenant_id, slug).await?;
 
@@ -845,13 +848,13 @@ impl EventPlannerService for EventPlannerGrpcService {
             .map_err(|err| Status::unauthenticated(err.to_string()))?;
         require_actor(&req.actor_user_id)?;
         let placement_uuid = parse_uuid(&req.placement_id, "placement_id")?;
-        let actor_uuid = parse_uuid(&req.actor_user_id, "actor_user_id")?;
         let body = require_nonempty(&req.body, "body")?;
 
         let pool = self.pool()?;
         let mut tx = pool.begin().await.map_err(db_status)?;
         let tenant_id = resolve_tenant_id(&mut tx, tenant.as_str()).await?;
         set_transaction_tenant(&mut tx, tenant_id).await?;
+        let actor_uuid = resolve_actor_uuid(&mut tx, tenant_id, &req.actor_user_id).await?;
 
         // Copy the parent placement's event_layer_id onto the note
         // row. This denormalization (per migration 0015 comments)
@@ -913,12 +916,12 @@ impl EventPlannerService for EventPlannerGrpcService {
             .map_err(|err| Status::unauthenticated(err.to_string()))?;
         require_actor(&req.actor_user_id)?;
         let note_uuid = parse_uuid(&req.note_id, "note_id")?;
-        let actor_uuid = parse_uuid(&req.actor_user_id, "actor_user_id")?;
 
         let pool = self.pool()?;
         let mut tx = pool.begin().await.map_err(db_status)?;
         let tenant_id = resolve_tenant_id(&mut tx, tenant.as_str()).await?;
         set_transaction_tenant(&mut tx, tenant_id).await?;
+        let actor_uuid = resolve_actor_uuid(&mut tx, tenant_id, &req.actor_user_id).await?;
 
         // Only the original author can delete their own note. The
         // spec calls notes append-only for Phase 3; deletion is the
@@ -1004,13 +1007,13 @@ impl EventPlannerService for EventPlannerGrpcService {
         require_actor(&req.actor_user_id)?;
         let slug = require_slug(&req.event_layer_slug)?;
         let name = require_nonempty(&req.name, "name")?;
-        let actor_uuid = parse_uuid(&req.actor_user_id, "actor_user_id")?;
 
         let pool = self.pool()?;
         let mut tx = pool.begin().await.map_err(db_status)?;
         let tenant_id = resolve_tenant_id(&mut tx, tenant.as_str()).await?;
         set_transaction_tenant(&mut tx, tenant_id).await?;
         let event_layer_id = resolve_event_layer_id(&mut tx, tenant_id, slug).await?;
+        let actor_uuid = resolve_actor_uuid(&mut tx, tenant_id, &req.actor_user_id).await?;
 
         let row = sqlx::query(
             r#"
@@ -1533,9 +1536,41 @@ async fn resolve_display_name(
     Ok(Some(name))
 }
 
-/// Mutations require a planner session. The GraphQL sidecar resolves
-/// the session cookie to the user uuid before calling the RPC; an
-/// empty `actor_user_id` therefore means unauthenticated.
+async fn resolve_actor_uuid(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    actor_user_id: &str,
+) -> Result<Uuid, Status> {
+    require_actor(actor_user_id)?;
+    let actor_uuid = parse_uuid(actor_user_id, "actor_user_id")?;
+    let no_login_actor_uuid = parse_uuid(NO_LOGIN_PLANNER_ACTOR_ID, "actor_user_id")?;
+
+    if actor_uuid != no_login_actor_uuid {
+        return Ok(actor_uuid);
+    }
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO event_planner_users (tenant_id, email, display_name)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (tenant_id, email)
+        DO UPDATE SET display_name = EXCLUDED.display_name
+        RETURNING id
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(NO_LOGIN_PLANNER_EMAIL)
+    .bind(NO_LOGIN_PLANNER_DISPLAY_NAME)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_status)?;
+
+    Ok(row.get::<Uuid, _>("id"))
+}
+
+/// Mutations still require an actor id at the service boundary, but
+/// GraphQL's no-login planner path now supplies a shared actor id
+/// instead of forcing a browser session.
 fn require_actor(actor_user_id: &str) -> Result<(), Status> {
     if actor_user_id.trim().is_empty() {
         Err(Status::unauthenticated(

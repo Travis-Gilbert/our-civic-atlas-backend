@@ -17,7 +17,7 @@ use civic_atlas_types::event_planner::{
 use serde_json::{json, Value};
 use tonic::Request;
 
-use crate::event_planner::EventPlannerGrpcService;
+use crate::event_planner::{EventPlannerGrpcService, NO_LOGIN_PLANNER_ACTOR_ID};
 use crate::AtlasState;
 
 #[derive(Clone)]
@@ -202,7 +202,7 @@ impl EventPlannerMutation {
         ctx: &Context<'_>,
         input: PlacementCreateInput,
     ) -> async_graphql::Result<PlacementMutationResult> {
-        let actor_user_id = actor_user_id(ctx)?;
+        let actor_user_id = actor_user_id(ctx);
         let response = service(ctx)?
             .create_placement(Request::new(PlacementCreateRequest {
                 tenant_context: Some(default_tenant_context()),
@@ -227,7 +227,7 @@ impl EventPlannerMutation {
         ctx: &Context<'_>,
         input: PlacementUpdateInput,
     ) -> async_graphql::Result<PlacementMutationResult> {
-        let actor_user_id = actor_user_id(ctx)?;
+        let actor_user_id = actor_user_id(ctx);
         let category = field_update(input.category, stringify);
         let sublabel = field_update(input.sublabel, stringify);
         let label = field_update(input.label, stringify);
@@ -266,7 +266,7 @@ impl EventPlannerMutation {
         ctx: &Context<'_>,
         input: PlacementDeleteInput,
     ) -> async_graphql::Result<PlacementMutationResult> {
-        let actor_user_id = actor_user_id(ctx)?;
+        let actor_user_id = actor_user_id(ctx);
         let response = service(ctx)?
             .delete_placement(Request::new(PlacementDeleteRequest {
                 tenant_context: Some(default_tenant_context()),
@@ -286,7 +286,7 @@ impl EventPlannerMutation {
         ctx: &Context<'_>,
         input: TaskCreateInput,
     ) -> async_graphql::Result<TaskMutationResult> {
-        let actor_user_id = actor_user_id(ctx)?;
+        let actor_user_id = actor_user_id(ctx);
         let response = service(ctx)?
             .create_task(Request::new(TaskCreateRequest {
                 tenant_context: Some(default_tenant_context()),
@@ -311,7 +311,7 @@ impl EventPlannerMutation {
         ctx: &Context<'_>,
         input: TaskUpdateInput,
     ) -> async_graphql::Result<TaskMutationResult> {
-        let actor_user_id = actor_user_id(ctx)?;
+        let actor_user_id = actor_user_id(ctx);
         let title = field_update(input.title, stringify);
         let owner = field_update(input.owner_user_id, stringify);
         let due_at = field_update(input.due_at, |value| iso_to_ms(Some(&value)));
@@ -350,7 +350,7 @@ impl EventPlannerMutation {
         ctx: &Context<'_>,
         input: TaskDeleteInput,
     ) -> async_graphql::Result<TaskMutationResult> {
-        let actor_user_id = actor_user_id(ctx)?;
+        let actor_user_id = actor_user_id(ctx);
         let response = service(ctx)?
             .delete_task(Request::new(TaskDeleteRequest {
                 tenant_context: Some(default_tenant_context()),
@@ -411,14 +411,12 @@ fn service(ctx: &Context<'_>) -> async_graphql::Result<EventPlannerGrpcService> 
     Ok(EventPlannerGrpcService::new(state.clone()))
 }
 
-fn actor_user_id(ctx: &Context<'_>) -> async_graphql::Result<String> {
+fn actor_user_id(ctx: &Context<'_>) -> String {
     let actor = ctx
         .data_opt::<PlannerActor>()
         .map(|actor| actor.user_id.trim())
         .filter(|actor| !actor.is_empty());
-    actor.map(ToString::to_string).ok_or_else(|| {
-        async_graphql::Error::new("This mutation requires a signed-in planner session.")
-    })
+    actor.unwrap_or(NO_LOGIN_PLANNER_ACTOR_ID).to_string()
 }
 
 fn tenant_context(tenant_slug: &str) -> TenantContext {
