@@ -74,3 +74,77 @@ the live seam once the backend is confirmed reachable in that environment.
   frontend); UPDATE/INSERT `traffic_segments` rows with `source_status: live` +
   snapshot `status: live` for measured segments, lower confidence for inferred
   ones, calibrate against any counts.
+
+---
+
+## Update 2026-06-06 (PM): real AADT live + the 0020 migration-collision postmortem
+
+### Shipped since the note above
+- **TR-B2b**: `traffic_realtime` now READS `traffic_segments` (tenant-RLS tx,
+  `ST_AsGeoJSON`, fixture fallback on empty/error). See `db_snapshot()` in `traffic.rs`.
+- **TR-B2c**: `0020_traffic_centerline_seed_geometry.sql` traces the 6 corridors to
+  real OSM centerline geometry.
+- **Real data (TR real)**: `0021_flint_aadt_segments.sql` replaces the 6 placeholders
+  with the **top-60 Flint segments by real MDOT 2024 AADT**, generated from
+  `data/flint_aadt_2024.geojson` by `scripts/build_flint_aadt_migration.py`. Honest
+  provenance: `estimate_basis = HOURLY_PATTERN`, `source_status = HISTORIC_AVERAGE`,
+  never `live`. New `HISTORIC_AVERAGE` value added to the `TrafficSourceStatus` +
+  `TrafficFeedStatus` enums (backend resolver + frontend schema/codegen/adapter, all green).
+- **Prod** (`our-civic-atlas-backend-production.up.railway.app/graphql`) now returns
+  `segmentCount: 60`, `status: HISTORIC_AVERAGE`, real LineString geometry per segment.
+
+### Postmortem: the 0020 collision (do not repeat)
+The frontend lane (Claude) seeded AADT as `0020_flint_aadt_segments.sql`; the backend
+lane (Codex) independently added `0020_traffic_centerline_seed_geometry.sql`. `sqlx::migrate!`
+keys migrations by **version + checksum**, so deploy `fb0c39e` crashed on boot:
+`migration 20 was previously applied but has been modified`. Resolved by renumbering AADT
+to `0021` (centerline keeps `0020`). Prod had NOT recorded a poisoned v20 (the failed
+migration rolled back inside its txn), so `199bc34` applied `0020`+`0021` fresh and
+deployed green.
+
+**Anti-collision protocol (binding):** the migration version is a serialization point
+between the two lanes. Before adding a migration, claim the next number HERE first, in the
+same commit that adds the file.
+
+> **Next free migration number: `0022`.** Whoever takes it bumps this line to `0023`.
+
+### Lane split for #2 (full road network + isochrones)
+Decided by the frontend lane to stop the repeated backend collisions; informing, not assigning:
+- **Backend lane (Codex):** full OSM road-network graph (nodes + edges, proper topology) as
+  migration `0022`; a RustyRed **`expand_bounded_weighted`** shortest-path isochrone
+  computation (named tool = hard requirement); and the `trafficIsochrone` GraphQL field below.
+- **Frontend lane (Claude):** the isochrone render (`AtlasIsochroneLayer`, design-gated) that
+  consumes `trafficIsochrone`, with an honest fixture fallback (same GraphQL-canonical pattern
+  as `trafficRealtime`). **The frontend lane will NOT add backend migrations** — this is the
+  structural fix for the 0020 collision.
+
+### Proposed GraphQL contract: `trafficIsochrone` (agree before building)
+Reuses the existing `TrafficEstimateBasis` / `TrafficSourceStatus` enums so provenance honesty
+carries through (AADT-weighted speeds are `HISTORIC_AVERAGE`, never `live`):
+
+```graphql
+type TrafficIsochroneBand {
+  minutes: Int!          # travel-time threshold for this band (e.g. 5, 10, 15)
+  reachableArea: JSON!   # GeoJSON Polygon/MultiPolygon (hull of nodes reached <= minutes)
+  nodeCount: Int!        # OSM graph nodes reached within `minutes`
+}
+type TrafficIsochrone {
+  networkId: ID!
+  origin: [Float!]!      # [lng, lat] the isochrone expands from
+  generatedAt: String!
+  estimateBasis: TrafficEstimateBasis!   # HOURLY_PATTERN (AADT-derived congested speeds)
+  sourceStatus: TrafficSourceStatus!     # HISTORIC_AVERAGE (never claims a live source)
+  bands: [TrafficIsochroneBand!]!
+  supportNote: String!
+}
+extend type Query {
+  # Shortest-path travel-time bands over the OSM road graph from `origin`, edge weights =
+  # length / AADT-derived congested speed. `minutes` are the requested band thresholds.
+  trafficIsochrone(networkId: ID!, origin: [Float!]!, minutes: [Int!]!): TrafficIsochrone!
+}
+```
+
+Backend note: `expand_bounded_weighted` yields the set of reached nodes per time budget; the
+band polygon is the concave hull (alpha-shape) of those nodes. If the OSM graph for `flint`
+is not loaded yet, return an honest empty-bands snapshot with `sourceStatus: PENDING_LIVE_SOURCE`
+and a `supportNote` saying so, rather than fabricating reachable area.
