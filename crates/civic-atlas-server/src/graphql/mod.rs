@@ -21,6 +21,7 @@ pub mod event_planner;
 pub mod query;
 pub mod reconstruction;
 pub mod search;
+pub mod traffic;
 
 use async_graphql::{
     EmptySubscription, MergedObject, Request as GraphQLRequest, Response as GraphQLResponse, Schema,
@@ -407,5 +408,16 @@ mod tests {
         assert!(sdl.contains("placements"));
         assert!(sdl.contains("createPlacement"));
         assert!(sdl.contains("updatePlacement"));
+    }
+
+    #[test]
+    fn schema_builds_with_traffic_fields() {
+        let state = AtlasState::from_env().expect("fixture AtlasState builds");
+        let sdl = build_schema(state).sdl();
+
+        assert!(sdl.contains("trafficRealtime"));
+        assert!(sdl.contains("TrafficRealtimeSnapshot"));
+        assert!(sdl.contains("estimateBasis"));
+        assert!(sdl.contains("FIXTURE_FALLBACK"));
     }
 }
