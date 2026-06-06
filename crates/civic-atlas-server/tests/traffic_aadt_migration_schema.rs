@@ -4,9 +4,9 @@
 //! (mirrors traffic_road_network_schema.rs). The migration is generated from
 //! MDOT 2024 AADT (scripts/build_flint_aadt_migration.py) and is ALSO validated
 //! against a real PostGIS container before shipping (applies on top of
-//! 0001..0019, DELETEs the placeholders, seeds 60 real LineString segments).
+//! 0001..0020, DELETEs the placeholders, seeds 60 real LineString segments).
 
-const MIGRATION: &str = include_str!("../../../migrations/0020_flint_aadt_segments.sql");
+const MIGRATION: &str = include_str!("../../../migrations/0021_flint_aadt_segments.sql");
 
 fn normalized_sql() -> String {
     MIGRATION
@@ -35,7 +35,7 @@ fn provenance_is_measured_historic_not_live() {
     // Honest provenance: real MDOT 2024 AADT, an hourly-pattern historic average.
     assert!(sql.contains("mdot 2024 aadt"));
     assert!(sql.contains("'hourly_pattern'"));
-    assert!(sql.contains("'fixture'"));
+    assert!(sql.contains("'historic_average'"));
     // A historic seed never claims a live source_status.
     assert!(
         !sql.contains("'live'"),

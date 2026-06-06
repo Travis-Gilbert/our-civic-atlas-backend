@@ -42,6 +42,8 @@ pub enum TrafficEstimateBasis {
 pub enum TrafficSourceStatus {
     #[graphql(name = "LIVE")]
     Live,
+    #[graphql(name = "HISTORIC_AVERAGE")]
+    HistoricAverage,
     #[graphql(name = "FIXTURE")]
     Fixture,
     #[graphql(name = "PENDING_LIVE_SOURCE")]
@@ -53,6 +55,8 @@ pub enum TrafficSourceStatus {
 pub enum TrafficFeedStatus {
     #[graphql(name = "LIVE")]
     Live,
+    #[graphql(name = "HISTORIC_AVERAGE")]
+    HistoricAverage,
     #[graphql(name = "FIXTURE_FALLBACK")]
     FixtureFallback,
     #[graphql(name = "UNAVAILABLE")]
@@ -209,6 +213,11 @@ async fn db_snapshot(
         .any(|segment| matches!(segment.source_status, TrafficSourceStatus::Live))
     {
         TrafficFeedStatus::Live
+    } else if segments
+        .iter()
+        .any(|segment| matches!(segment.source_status, TrafficSourceStatus::HistoricAverage))
+    {
+        TrafficFeedStatus::HistoricAverage
     } else {
         TrafficFeedStatus::FixtureFallback
     };
@@ -218,14 +227,21 @@ async fn db_snapshot(
         feed_id: ID(format!("traffic:{network_id}:postgis")),
         source_label: match status {
             TrafficFeedStatus::Live => "PostGIS traffic_segments live feed".to_string(),
+            TrafficFeedStatus::HistoricAverage => {
+                "MDOT 2024 AADT official historic average".to_string()
+            }
             TrafficFeedStatus::FixtureFallback => {
                 "PostGIS traffic_segments fixture fallback".to_string()
             }
             TrafficFeedStatus::Unavailable => "Traffic source unavailable".to_string(),
         },
-        source_url: Some(
-            "https://www.michigan.gov/mdot/travel/safety/efforts/its/its-data".to_string(),
-        ),
+        source_url: Some(match status {
+            TrafficFeedStatus::HistoricAverage => {
+                "https://mdotgis.state.mi.us/arcgis/rest/services/DataAccess/MdotAadtCaadt2024/FeatureServer/1"
+            }
+            _ => "https://www.michigan.gov/mdot/travel/safety/efforts/its/its-data",
+        }
+        .to_string()),
         status,
         generated_at: generated_at_iso,
         refresh_interval_seconds: 15,
@@ -326,7 +342,7 @@ fn summarize(segments: &[TrafficSegment]) -> TrafficRealtimeSummary {
     let n = segments.len().max(1) as f64;
     TrafficRealtimeSummary {
         segment_count: segments.len() as i32,
-        live_feed_segments: count_basis(segments, TrafficEstimateBasis::LiveFeed),
+        live_feed_segments: count_source_status(segments, TrafficSourceStatus::Live),
         inferred_segments: count_basis(segments, TrafficEstimateBasis::HourlyPattern),
         congested_segments: segments
             .iter()
@@ -343,6 +359,13 @@ fn count_basis(segments: &[TrafficSegment], basis: TrafficEstimateBasis) -> i32 
     segments
         .iter()
         .filter(|s| s.estimate_basis == basis)
+        .count() as i32
+}
+
+fn count_source_status(segments: &[TrafficSegment], status: TrafficSourceStatus) -> i32 {
+    segments
+        .iter()
+        .filter(|s| s.source_status == status)
         .count() as i32
 }
 
@@ -378,6 +401,7 @@ fn estimate_basis_from_db(raw: &str) -> TrafficEstimateBasis {
 fn source_status_from_db(raw: &str) -> TrafficSourceStatus {
     match raw {
         "live" => TrafficSourceStatus::Live,
+        "historic_average" => TrafficSourceStatus::HistoricAverage,
         "pending_live_source" => TrafficSourceStatus::PendingLiveSource,
         _ => TrafficSourceStatus::Fixture,
     }
@@ -718,7 +742,7 @@ mod tests {
             .iter()
             .all(|s| s.confidence >= 0.0 && s.confidence <= 1.0));
         assert_eq!(snap.summary.segment_count, 6);
-        assert_eq!(snap.summary.live_feed_segments, 3);
+        assert_eq!(snap.summary.live_feed_segments, 0);
         assert_eq!(snap.summary.inferred_segments, 3);
     }
 
