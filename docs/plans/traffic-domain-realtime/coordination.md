@@ -2,7 +2,10 @@
 
 To: frontend lane in `Open-Flint-Atlas-main-release` (Claude Code + Codex)
 From: 2026-06-06 backend traffic session in `our-civic-atlas-backend-main-release`
-Status: **TR-B1 shipped** (resolver, honest fixture). TR-B2 (road-network subgraph) and TR-B3 (live MDOT feed) open.
+Status: **TR-B1 + TR-B2 shipped** (resolver returns the honest fixture; the
+road-network table + seed are now in PostGIS, migration validated against a real
+postgis container). **TR-B2b** (resolver reads the table) and **TR-B3** (live MDOT
+feed) open.
 
 ## What shipped
 
@@ -49,11 +52,25 @@ the live seam once the backend is confirmed reachable in that environment.
   `cargo clippy --locked -p civic-atlas-server -- -D warnings` is red on `main`
   independent of traffic. Worth a separate cleanup pass.
 
+## Done: TR-B2 (road-network table)
+
+- **TR-B2 (shipped)**: migration `0019_traffic_road_network.sql` creates the
+  tenant-scoped `traffic_segments` table (RLS via `app.tenant_id`,
+  `geography(LINESTRING, 4326)`, gist index) and FK-safely seeds the 6 Flint
+  corridors for the `flint` tenant. Validated by applying the full chain
+  `0001..0019` to a real `postgis` container (seeds 6 valid LineStrings) plus a
+  DB-free structural test (`tests/traffic_road_network_schema.rs`). The migration
+  is boot-applied (`run_migrations` -> `sqlx::migrate!`), so this validation was
+  the deploy-safety gate.
+
 ## Next (backend lane)
 
-- **TR-B2**: migration `0019_traffic_road_network` (segments with capacity +
-  free-flow speed, tenant-scoped), seed Flint, and read from PostGIS instead of the
-  embedded fixture in `traffic.rs` (`fixture_snapshot` is the shaping seam to keep).
+- **TR-B2b**: wire `trafficRealtime` to READ `traffic_segments` (set
+  `app.tenant_id` in a tenant transaction per `tenant_db.rs`, `ST_AsGeoJSON` the
+  geometry), mapping rows through the existing diurnal/shaping path, and fall
+  back to the embedded fixture (`fixture_snapshot`) on empty/error so it can never
+  break. The table columns mirror the resolver's `SeedCorridor`.
 - **TR-B3**: wire the MDOT RIDE feed (server-side credential, never in the
-  frontend); set `sourceStatus: LIVE` + snapshot `status: LIVE` for measured
-  segments, lower confidence for inferred ones, calibrate against any counts.
+  frontend); UPDATE/INSERT `traffic_segments` rows with `source_status: live` +
+  snapshot `status: live` for measured segments, lower confidence for inferred
+  ones, calibrate against any counts.
