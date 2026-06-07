@@ -18,6 +18,7 @@
 
 pub mod civic_research;
 pub mod event_planner;
+pub mod layer;
 pub mod query;
 pub mod reconstruction;
 pub mod search;
@@ -419,5 +420,64 @@ mod tests {
         assert!(sdl.contains("TrafficRealtimeSnapshot"));
         assert!(sdl.contains("estimateBasis"));
         assert!(sdl.contains("FIXTURE_FALLBACK"));
+    }
+
+    #[test]
+    fn schema_builds_with_layer_contract_fields() {
+        let state = AtlasState::from_env().expect("fixture AtlasState builds");
+        let sdl = build_schema(state).sdl();
+
+        assert!(sdl.contains("type Layer"));
+        assert!(sdl.contains("type LayerView"));
+        assert!(sdl.contains("type LayerRecipe"));
+        assert!(sdl.contains("enum LayerKind"));
+        assert!(sdl.contains("layers("));
+        assert!(sdl.contains("layerView("));
+    }
+
+    #[tokio::test]
+    async fn traffic_layer_view_matches_traffic_snapshot_count() {
+        let state = AtlasState::from_env().expect("fixture AtlasState builds");
+        let schema = build_schema(state);
+        let response = schema
+            .execute(
+                r#"
+                {
+                  trafficRealtime(networkId: "flint-downtown") {
+                    status
+                    summary { segmentCount }
+                  }
+                  layerView(layerId: "layer:traffic:flint-downtown") {
+                    status
+                    summary { recordCount }
+                    records { id confidence visibility reviewStatus }
+                  }
+                }
+                "#,
+            )
+            .await;
+        assert!(
+            response.errors.is_empty(),
+            "unexpected GraphQL errors: {:?}",
+            response.errors
+        );
+        let data = response.data.into_json().expect("GraphQL data to JSON");
+        let traffic_count = data["trafficRealtime"]["summary"]["segmentCount"]
+            .as_i64()
+            .expect("traffic segmentCount");
+        let layer_count = data["layerView"]["summary"]["recordCount"]
+            .as_i64()
+            .expect("layer recordCount");
+
+        assert_eq!(data["trafficRealtime"]["status"], "FIXTURE_FALLBACK");
+        assert_eq!(data["layerView"]["status"], "FIXTURE");
+        assert_eq!(traffic_count, layer_count);
+        assert_eq!(
+            data["layerView"]["records"]
+                .as_array()
+                .expect("layer records")
+                .len() as i64,
+            traffic_count
+        );
     }
 }

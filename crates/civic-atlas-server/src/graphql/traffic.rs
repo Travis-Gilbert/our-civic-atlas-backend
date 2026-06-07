@@ -130,17 +130,23 @@ impl TrafficQuery {
             .data::<AtlasState>()
             .map_err(|_| async_graphql::Error::new("AtlasState missing from GraphQL context"))?;
 
-        match db_snapshot(state, &network_id.0).await {
-            Ok(Some(snapshot)) => Ok(snapshot),
-            Ok(None) => Ok(fixture_snapshot(&network_id.0)),
-            Err(error) => {
-                warn!(
-                    ?error,
-                    network_id = network_id.0.as_str(),
-                    "trafficRealtime PostGIS read failed; using fixture fallback",
-                );
-                Ok(fixture_snapshot(&network_id.0))
-            }
+        snapshot_for_network(state, &network_id.0).await
+    }
+}
+
+pub async fn snapshot_for_network(
+    state: &AtlasState,
+    network_id: &str,
+) -> async_graphql::Result<TrafficRealtimeSnapshot> {
+    match db_snapshot(state, network_id).await {
+        Ok(Some(snapshot)) => Ok(snapshot),
+        Ok(None) => Ok(fixture_snapshot(network_id)),
+        Err(error) => {
+            warn!(
+                ?error,
+                network_id, "trafficRealtime PostGIS read failed; using fixture fallback",
+            );
+            Ok(fixture_snapshot(network_id))
         }
     }
 }
