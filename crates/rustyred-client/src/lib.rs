@@ -253,6 +253,136 @@ impl Client {
         Ok(response.json().await?)
     }
 
+    /// `POST /v1/tenants/:tenant_id/graph/spatial/designate_geometry`.
+    ///
+    /// Registers a geometry-bearing property for S2 broad-phase indexing
+    /// and exact geometry predicate refinement. Matching future node
+    /// upserts refresh the geometry cover on the RustyRed side.
+    pub async fn designate_geometry(
+        &self,
+        tenant_id: &str,
+        request: &GeometryDesignationRequest,
+    ) -> Result<GeometryDesignationResponse, RustyRedError> {
+        let path = format!("/v1/tenants/{tenant_id}/graph/spatial/designate_geometry");
+        let url = format!("{}{path}", self.config.base_url);
+        let response = self.http.post(&url).json(request).send().await?;
+        if !response.status().is_success() {
+            return Err(make_upstream_error(response, &path).await);
+        }
+        Ok(response.json().await?)
+    }
+
+    /// `POST /v1/tenants/:tenant_id/graph/spatial/contains`.
+    ///
+    /// Returns designated polygon or multipolygon node ids containing the
+    /// supplied WGS84 point. `lat` and `lon` match the server body names.
+    pub async fn geometry_contains_point(
+        &self,
+        tenant_id: &str,
+        request: &GeometryContainsRequest,
+    ) -> Result<GeometryIdsResponse, RustyRedError> {
+        self.geometry_ids_operation(tenant_id, "contains", request)
+            .await
+    }
+
+    /// `POST /v1/tenants/:tenant_id/graph/spatial/intersects`.
+    ///
+    /// Returns designated geometry node ids that intersect the query
+    /// geometry. The query geometry shape depends on `encoding`.
+    pub async fn geometry_intersects(
+        &self,
+        tenant_id: &str,
+        request: &GeometryQueryRequest,
+    ) -> Result<GeometryIdsResponse, RustyRedError> {
+        self.geometry_ids_operation(tenant_id, "intersects", request)
+            .await
+    }
+
+    /// `POST /v1/tenants/:tenant_id/graph/spatial/within`.
+    ///
+    /// Returns designated geometry node ids whose stored geometry is
+    /// contained within the query geometry.
+    pub async fn geometry_within(
+        &self,
+        tenant_id: &str,
+        request: &GeometryQueryRequest,
+    ) -> Result<GeometryIdsResponse, RustyRedError> {
+        self.geometry_ids_operation(tenant_id, "within", request)
+            .await
+    }
+
+    async fn geometry_ids_operation<T: Serialize + ?Sized>(
+        &self,
+        tenant_id: &str,
+        operation: &str,
+        request: &T,
+    ) -> Result<GeometryIdsResponse, RustyRedError> {
+        let path = format!("/v1/tenants/{tenant_id}/graph/spatial/{operation}");
+        let url = format!("{}{path}", self.config.base_url);
+        let response = self.http.post(&url).json(request).send().await?;
+        if !response.status().is_success() {
+            return Err(make_upstream_error(response, &path).await);
+        }
+        Ok(response.json().await?)
+    }
+
+    /// `POST /v1/tenants/:tenant_id/graph/bulk/nodes`.
+    ///
+    /// Sends node records as application/jsonl, matching RustyRed's
+    /// streaming bulk loader. Use this for projection/outbox write paths
+    /// that need to land many reconstruction graph nodes at once.
+    pub async fn bulk_nodes(
+        &self,
+        tenant_id: &str,
+        records: &[BulkNodeRecord],
+        batch_size: Option<usize>,
+    ) -> Result<BulkIngestResponse, RustyRedError> {
+        let path = format!("/v1/tenants/{tenant_id}/graph/bulk/nodes");
+        let url = format!("{}{path}", self.config.base_url);
+        let body = jsonl_body(records)?;
+        let mut request = self
+            .http
+            .post(&url)
+            .header(CONTENT_TYPE, "application/jsonl")
+            .body(body);
+        if let Some(batch_size) = batch_size {
+            request = request.query(&[("batch_size", batch_size)]);
+        }
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            return Err(make_upstream_error(response, &path).await);
+        }
+        Ok(response.json().await?)
+    }
+
+    /// `POST /v1/tenants/:tenant_id/graph/bulk/edges`.
+    ///
+    /// Sends edge records as application/jsonl. Endpoint node ids must
+    /// already exist in the same tenant or RustyRed reports line errors.
+    pub async fn bulk_edges(
+        &self,
+        tenant_id: &str,
+        records: &[BulkEdgeRecord],
+        batch_size: Option<usize>,
+    ) -> Result<BulkIngestResponse, RustyRedError> {
+        let path = format!("/v1/tenants/{tenant_id}/graph/bulk/edges");
+        let url = format!("{}{path}", self.config.base_url);
+        let body = jsonl_body(records)?;
+        let mut request = self
+            .http
+            .post(&url)
+            .header(CONTENT_TYPE, "application/jsonl")
+            .body(body);
+        if let Some(batch_size) = batch_size {
+            request = request.query(&[("batch_size", batch_size)]);
+        }
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            return Err(make_upstream_error(response, &path).await);
+        }
+        Ok(response.json().await?)
+    }
+
     /// `GET /v1/tenants/:tenant_id/graph/nodes/:node_id`.
     ///
     /// Fetches a single node so full-text hits (which carry only
@@ -508,6 +638,127 @@ pub struct SpatialBboxResponse {
     pub extra: serde_json::Map<String, Value>,
 }
 
+/// Geometry encoding accepted by RustyRed's geometry plugin. `Subgraph`
+/// is declared for consumers that persist decomposed geometry payloads;
+/// scalar geometry queries normally use `Wkt` or `Wkb`.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GeometryEncoding {
+    Point,
+    Wkb,
+    Wkt,
+    Subgraph,
+}
+
+/// Body for `graph/spatial/designate_geometry`.
+#[derive(Debug, Clone, Serialize)]
+pub struct GeometryDesignationRequest {
+    pub label: String,
+    pub property: String,
+    pub encoding: GeometryEncoding,
+    pub resolution: u8,
+}
+
+/// Body for `graph/spatial/contains`.
+#[derive(Debug, Clone, Serialize)]
+pub struct GeometryContainsRequest {
+    pub label: String,
+    pub property: String,
+    pub lat: f64,
+    pub lon: f64,
+}
+
+/// Body for `graph/spatial/intersects` and `graph/spatial/within`.
+#[derive(Debug, Clone, Serialize)]
+pub struct GeometryQueryRequest {
+    pub label: String,
+    pub property: String,
+    pub geometry: Value,
+    pub encoding: GeometryEncoding,
+}
+
+/// Response for geometry query endpoints.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GeometryIdsResponse {
+    #[serde(default = "default_true")]
+    pub ok: bool,
+    #[serde(default)]
+    pub tenant: Option<String>,
+    #[serde(default)]
+    pub operation: Option<String>,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub node_ids: Vec<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// Response for `graph/spatial/designate_geometry`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GeometryDesignationResponse {
+    #[serde(default = "default_true")]
+    pub ok: bool,
+    #[serde(default)]
+    pub tenant: Option<String>,
+    #[serde(default)]
+    pub operation: Option<String>,
+    #[serde(default)]
+    pub designated: Option<GeometryDesignation>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// Designation descriptor echoed by RustyRed.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GeometryDesignation {
+    pub label: String,
+    pub property: String,
+    pub encoding: GeometryEncoding,
+    pub resolution: u8,
+}
+
+/// Node record accepted by RustyRed's JSONL bulk node loader.
+#[derive(Debug, Clone, Serialize)]
+pub struct BulkNodeRecord {
+    pub id: String,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub properties: serde_json::Map<String, Value>,
+}
+
+/// Edge record accepted by RustyRed's JSONL bulk edge loader.
+#[derive(Debug, Clone, Serialize)]
+pub struct BulkEdgeRecord {
+    pub id: String,
+    pub from_id: String,
+    pub to_id: String,
+    #[serde(rename = "type")]
+    pub edge_type: String,
+    #[serde(default)]
+    pub properties: serde_json::Map<String, Value>,
+}
+
+/// Response for JSONL bulk ingest endpoints.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BulkIngestResponse {
+    #[serde(default = "default_true")]
+    pub ok: bool,
+    #[serde(default)]
+    pub tenant: Option<String>,
+    #[serde(default)]
+    pub inserted: usize,
+    #[serde(default)]
+    pub failed: usize,
+    #[serde(default)]
+    pub errors: Vec<Value>,
+    #[serde(default)]
+    pub batches: usize,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
 /// Response of `GET graph/nodes/:node_id`. RustyRed returns
 /// `{ ok, node }` on a hit and a bare `404` on a miss. [`Client::get_node`]
 /// maps the `404` to `{ ok: false, node: None }`.
@@ -604,6 +855,15 @@ pub struct SerpSearch {
     pub extra: serde_json::Map<String, Value>,
 }
 
+fn jsonl_body<T: Serialize>(records: &[T]) -> Result<String, RustyRedError> {
+    let mut out = String::new();
+    for record in records {
+        out.push_str(&serde_json::to_string(record)?);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 async fn make_upstream_error(response: reqwest::Response, path: &str) -> RustyRedError {
     let status = response.status().as_u16();
     let body = response
@@ -694,6 +954,52 @@ mod tests {
     }
 
     #[test]
+    fn geometry_designation_request_serializes_encoding() {
+        let request = GeometryDesignationRequest {
+            label: "Parcel".into(),
+            property: "geom".into(),
+            encoding: GeometryEncoding::Wkt,
+            resolution: 7,
+        };
+        let body = serde_json::to_string(&request).expect("serializable");
+        assert!(body.contains("\"label\":\"Parcel\""));
+        assert!(body.contains("\"property\":\"geom\""));
+        assert!(body.contains("\"encoding\":\"wkt\""));
+        assert!(body.contains("\"resolution\":7"));
+    }
+
+    #[test]
+    fn bulk_records_serialize_as_jsonl_loader_shape() {
+        let node = BulkNodeRecord {
+            id: "parcel:1".into(),
+            labels: vec!["Parcel".into()],
+            properties: serde_json::Map::from_iter([(
+                "geom".to_string(),
+                Value::String("POLYGON((0 0,1 0,1 1,0 1,0 0))".into()),
+            )]),
+        };
+        let edge = BulkEdgeRecord {
+            id: "edge:1".into(),
+            from_id: "parcel:1".into(),
+            to_id: "source:1".into(),
+            edge_type: "SUPPORTED_BY".into(),
+            properties: serde_json::Map::new(),
+        };
+
+        let nodes = jsonl_body(&[node]).expect("node jsonl");
+        let edges = jsonl_body(&[edge]).expect("edge jsonl");
+
+        assert!(nodes.ends_with('\n'));
+        assert!(nodes.contains("\"id\":\"parcel:1\""));
+        assert!(nodes.contains("\"labels\":[\"Parcel\"]"));
+        assert!(edges.ends_with('\n'));
+        assert!(edges.contains("\"from_id\":\"parcel:1\""));
+        assert!(edges.contains("\"to_id\":\"source:1\""));
+        assert!(edges.contains("\"type\":\"SUPPORTED_BY\""));
+        assert!(!edges.contains("edge_type"));
+    }
+
+    #[test]
     fn fulltext_response_parses_node_id_and_score() {
         let raw = serde_json::json!({
             "ok": true,
@@ -704,8 +1010,7 @@ mod tests {
             ],
         })
         .to_string();
-        let parsed: FullTextSearchResponse =
-            serde_json::from_str(&raw).expect("deserializable");
+        let parsed: FullTextSearchResponse = serde_json::from_str(&raw).expect("deserializable");
         assert!(parsed.ok);
         assert_eq!(parsed.tenant.as_deref(), Some("flint"));
         assert_eq!(parsed.results.len(), 2);
