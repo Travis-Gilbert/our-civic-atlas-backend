@@ -34,18 +34,20 @@ use civic_atlas_types::civic_atlas::v1::{
 };
 use civic_atlas_types::event_planner::{
     BookmarkCreateRequest, BookmarkDeleteRequest, BookmarkListRequest, BookmarkListResponse,
-    BookmarkMutationResponse, BookmarkUpdateRequest, CameraBookmark, EventLayer,
-    EventLayerListRequest, EventLayerListResponse, EventPlannerService, IntakePendingVendorRequest,
-    IntakePendingVendorResponse, Placement, PlacementCreateRequest, PlacementDeleteRequest,
-    PlacementListRequest, PlacementListResponse, PlacementMutationResponse, PlacementNote,
-    PlacementNoteCreateRequest, PlacementNoteDeleteRequest, PlacementNoteListRequest,
-    PlacementNoteListResponse, PlacementNoteMutationResponse, PlacementUpdateRequest, Task,
-    TaskCreateRequest, TaskDeleteRequest, TaskListRequest, TaskListResponse, TaskMutationResponse,
-    TaskUpdateRequest,
+    BookmarkMutationResponse, BookmarkUpdateRequest, CameraBookmark, EventApplication,
+    EventApplicationListRequest, EventApplicationListResponse, EventApplicationSubmitRequest,
+    EventApplicationSubmitResponse, EventLayer, EventLayerListRequest, EventLayerListResponse,
+    EventPlannerService, IntakePendingVendorRequest, IntakePendingVendorResponse, Placement,
+    PlacementCreateRequest, PlacementDeleteRequest, PlacementListRequest, PlacementListResponse,
+    PlacementMutationResponse, PlacementNote, PlacementNoteCreateRequest,
+    PlacementNoteDeleteRequest, PlacementNoteListRequest, PlacementNoteListResponse,
+    PlacementNoteMutationResponse, PlacementUpdateRequest, Task, TaskCreateRequest,
+    TaskDeleteRequest, TaskListRequest, TaskListResponse, TaskMutationResponse, TaskUpdateRequest,
 };
 
 use crate::event_planner_auth;
-use sqlx::types::time::OffsetDateTime;
+use serde_json::{json, Value};
+use sqlx::types::{time::OffsetDateTime, Json as SqlJson};
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
 use tenant_resolver::require_tenant_context;
 use tonic::{Request, Response, Status};
@@ -115,6 +117,224 @@ impl EventPlannerService for EventPlannerGrpcService {
 
         let layers = rows.iter().map(event_layer_from_row).collect();
         Ok(Response::new(EventLayerListResponse { layers }))
+    }
+
+    async fn list_event_applications(
+        &self,
+        request: Request<EventApplicationListRequest>,
+    ) -> Result<Response<EventApplicationListResponse>, Status> {
+        let request = request.into_inner();
+        let tenant = require_tenant_context(request.tenant_context.as_ref())
+            .map_err(|err| Status::unauthenticated(err.to_string()))?;
+        let slug = require_slug(&request.event_layer_slug)?;
+
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await.map_err(db_status)?;
+        let tenant_id = resolve_tenant_id(&mut tx, tenant.as_str()).await?;
+        set_transaction_tenant(&mut tx, tenant_id).await?;
+
+        let category_filter = request.category.trim();
+        let status_filter = request.status.trim();
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                a.id,
+                a.event_layer_id,
+                a.category,
+                a.display_name,
+                a.contact_name,
+                a.contact_email,
+                a.contact_phone,
+                a.city,
+                a.bio,
+                a.flint_based,
+                a.access_needs,
+                a.category_payload_json,
+                a.planning_payload_json,
+                a.status,
+                CASE
+                    WHEN a.location IS NULL THEN NULL
+                    ELSE ST_AsGeoJSON(a.location::geometry)
+                END AS location_geojson,
+                a.set_time,
+                a.source_key,
+                a.created_at,
+                a.updated_at,
+                a.version
+            FROM event_applications a
+            JOIN event_layers l
+              ON l.id = a.event_layer_id AND l.tenant_id = a.tenant_id
+            WHERE a.tenant_id = $1
+              AND l.slug = $2
+              AND ($3 = '' OR a.category = $3)
+              AND ($4 = '' OR a.status = $4)
+            ORDER BY a.created_at DESC, a.display_name ASC
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(slug)
+        .bind(category_filter)
+        .bind(status_filter)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db_status)?;
+
+        tx.commit().await.map_err(db_status)?;
+
+        let applications = rows.iter().map(application_from_row).collect();
+        Ok(Response::new(EventApplicationListResponse { applications }))
+    }
+
+    async fn submit_event_application(
+        &self,
+        request: Request<EventApplicationSubmitRequest>,
+    ) -> Result<Response<EventApplicationSubmitResponse>, Status> {
+        let req = request.into_inner();
+        let tenant = require_tenant_context(req.tenant_context.as_ref())
+            .map_err(|err| Status::unauthenticated(err.to_string()))?;
+        let slug = require_slug(&req.event_layer_slug)?;
+        let category = require_application_category(&req.category)?;
+        let display_name = require_nonempty(&req.display_name, "display_name")?;
+        let contact_email = require_email(&req.contact_email)?;
+        let category_payload =
+            parse_json_object(&req.category_payload_json, "category_payload_json")?;
+        let planning_payload = default_application_planning_payload();
+        let source_key =
+            normalize_application_source_key(&req.source_key, &category, &contact_email);
+        let submitted_at = ms_to_offset_datetime(req.submitted_at_ms);
+
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await.map_err(db_status)?;
+        let tenant_id = resolve_tenant_id(&mut tx, tenant.as_str()).await?;
+        set_transaction_tenant(&mut tx, tenant_id).await?;
+        let event_layer_id = resolve_event_layer_id(&mut tx, tenant_id, slug).await?;
+
+        let existing_sql = application_select_sql(
+            r#"
+            FROM event_applications a
+            WHERE a.tenant_id = $1
+              AND a.event_layer_id = $2
+              AND a.source_key = $3
+            "#,
+        );
+        let existing = sqlx::query(&existing_sql)
+            .bind(tenant_id)
+            .bind(event_layer_id)
+            .bind(&source_key)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_status)?;
+
+        if let Some(row) = existing {
+            let application = application_from_row(&row);
+            let backup_recorded =
+                backup_receipt_exists(&mut tx, tenant_id, &application.id).await?;
+            tx.commit().await.map_err(db_status)?;
+            return Ok(Response::new(EventApplicationSubmitResponse {
+                application: Some(application),
+                created: false,
+                duplicate: true,
+                backup_recorded,
+            }));
+        }
+
+        let row = sqlx::query(
+            r#"
+            WITH inserted AS (
+                INSERT INTO event_applications (
+                    tenant_id,
+                    event_layer_id,
+                    category,
+                    display_name,
+                    contact_name,
+                    contact_email,
+                    contact_phone,
+                    city,
+                    bio,
+                    flint_based,
+                    access_needs,
+                    category_payload_json,
+                    planning_payload_json,
+                    status,
+                    source_key,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    $1, $2, $3, $4, NULLIF($5, ''), $6, NULLIF($7, ''),
+                    NULLIF($8, ''), NULLIF($9, ''), $10, NULLIF($11, ''),
+                    $12, $13, 'submitted', $14, COALESCE($15, now()), COALESCE($15, now())
+                )
+                RETURNING *
+            )
+            SELECT
+                inserted.id,
+                inserted.event_layer_id,
+                inserted.category,
+                inserted.display_name,
+                inserted.contact_name,
+                inserted.contact_email,
+                inserted.contact_phone,
+                inserted.city,
+                inserted.bio,
+                inserted.flint_based,
+                inserted.access_needs,
+                inserted.category_payload_json,
+                inserted.planning_payload_json,
+                inserted.status,
+                CASE
+                    WHEN inserted.location IS NULL THEN NULL
+                    ELSE ST_AsGeoJSON(inserted.location::geometry)
+                END AS location_geojson,
+                inserted.set_time,
+                inserted.source_key,
+                inserted.created_at,
+                inserted.updated_at,
+                inserted.version
+            FROM inserted
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(event_layer_id)
+        .bind(&category)
+        .bind(display_name)
+        .bind(req.contact_name.trim())
+        .bind(contact_email)
+        .bind(req.contact_phone.trim())
+        .bind(req.city.trim())
+        .bind(req.bio.trim())
+        .bind(req.flint_based)
+        .bind(req.access_needs.trim())
+        .bind(SqlJson(category_payload.clone()))
+        .bind(SqlJson(planning_payload.clone()))
+        .bind(&source_key)
+        .bind(submitted_at)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_status)?;
+
+        let application = application_from_row(&row);
+        let backup_payload = json!({
+            "applicationId": application.id,
+            "eventLayerId": application.event_layer_id,
+            "category": application.category,
+            "displayName": application.display_name,
+            "contactEmail": application.contact_email,
+            "submittedAtMs": application.created_at_ms,
+            "sourceKey": application.source_key,
+            "categoryPayload": category_payload,
+        });
+        let backup_recorded =
+            insert_backup_receipt(&mut tx, tenant_id, &application.id, backup_payload).await?;
+
+        tx.commit().await.map_err(db_status)?;
+
+        Ok(Response::new(EventApplicationSubmitResponse {
+            application: Some(application),
+            created: true,
+            duplicate: false,
+            backup_recorded,
+        }))
     }
 
     async fn list_placements(
@@ -1340,6 +1560,55 @@ fn event_layer_from_row(row: &PgRow) -> EventLayer {
     }
 }
 
+fn application_from_row(row: &PgRow) -> EventApplication {
+    EventApplication {
+        id: row.get::<Uuid, _>("id").to_string(),
+        event_layer_id: row.get::<Uuid, _>("event_layer_id").to_string(),
+        category: row.get::<String, _>("category"),
+        display_name: row.get::<String, _>("display_name"),
+        contact_name: row
+            .try_get::<Option<String>, _>("contact_name")
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        contact_email: row.get::<String, _>("contact_email"),
+        contact_phone: row
+            .try_get::<Option<String>, _>("contact_phone")
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        city: row
+            .try_get::<Option<String>, _>("city")
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        bio: row
+            .try_get::<Option<String>, _>("bio")
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        flint_based: row.try_get::<bool, _>("flint_based").unwrap_or(false),
+        access_needs: row
+            .try_get::<Option<String>, _>("access_needs")
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        category_payload_json: json_column(row, "category_payload_json"),
+        planning_payload_json: json_column(row, "planning_payload_json"),
+        status: row.get::<String, _>("status"),
+        location_geojson: row
+            .try_get::<Option<String>, _>("location_geojson")
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        set_time_ms: ts_ms(row, "set_time"),
+        source_key: row.get::<String, _>("source_key"),
+        created_at_ms: ts_ms(row, "created_at"),
+        updated_at_ms: ts_ms(row, "updated_at"),
+        version: row.try_get::<i64, _>("version").unwrap_or(1),
+    }
+}
+
 fn placement_from_row(row: &PgRow) -> Placement {
     Placement {
         id: row.get::<Uuid, _>("id").to_string(),
@@ -1458,6 +1727,163 @@ fn ts_ms(row: &PgRow, column: &str) -> i64 {
 
 fn db_status(error: sqlx::Error) -> Status {
     Status::internal(format!("database error: {error}"))
+}
+
+fn application_select_sql(from_where: &str) -> String {
+    format!(
+        r#"
+        SELECT
+            a.id,
+            a.event_layer_id,
+            a.category,
+            a.display_name,
+            a.contact_name,
+            a.contact_email,
+            a.contact_phone,
+            a.city,
+            a.bio,
+            a.flint_based,
+            a.access_needs,
+            a.category_payload_json,
+            a.planning_payload_json,
+            a.status,
+            CASE
+                WHEN a.location IS NULL THEN NULL
+                ELSE ST_AsGeoJSON(a.location::geometry)
+            END AS location_geojson,
+            a.set_time,
+            a.source_key,
+            a.created_at,
+            a.updated_at,
+            a.version
+        {from_where}
+        "#
+    )
+}
+
+fn json_column(row: &PgRow, column: &str) -> String {
+    row.try_get::<SqlJson<Value>, _>(column)
+        .map(|value| value.0.to_string())
+        .unwrap_or_else(|_| "{}".to_string())
+}
+
+fn default_application_planning_payload() -> Value {
+    json!({
+        "accepted": false,
+        "contacted": false,
+        "paid": false,
+        "fee": null,
+        "payment_to_band": null,
+        "location": null,
+        "set_time": null,
+        "status": "submitted",
+    })
+}
+
+fn parse_json_object(raw: &str, field: &str) -> Result<Value, Status> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(json!({}));
+    }
+    let value: Value = serde_json::from_str(trimmed)
+        .map_err(|err| Status::invalid_argument(format!("{field} must be valid JSON: {err}")))?;
+    if !value.is_object() {
+        return Err(Status::invalid_argument(format!(
+            "{field} must be a JSON object"
+        )));
+    }
+    Ok(value)
+}
+
+fn require_application_category(category: &str) -> Result<String, Status> {
+    match category.trim().to_lowercase().as_str() {
+        "musician" | "music" | "band" => Ok("musician".to_string()),
+        "entertainer" | "performer" => Ok("entertainer".to_string()),
+        "other" | "organization" | "org" | "community" => Ok("other".to_string()),
+        "vendor" => Ok("vendor".to_string()),
+        _ => Err(Status::invalid_argument(
+            "category must be one of musician, vendor, entertainer, other",
+        )),
+    }
+}
+
+fn require_email(email: &str) -> Result<String, Status> {
+    let normalized = email.trim().to_lowercase();
+    if normalized.is_empty() || !normalized.contains('@') {
+        return Err(Status::invalid_argument(
+            "contact_email must be a valid email",
+        ));
+    }
+    Ok(normalized)
+}
+
+fn normalize_application_source_key(source_key: &str, category: &str, email: &str) -> String {
+    let trimmed = source_key.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    format!("public:{category}:{email}")
+}
+
+async fn backup_receipt_exists(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    application_id: &str,
+) -> Result<bool, Status> {
+    let application_uuid = parse_uuid(application_id, "event_application_id")?;
+    let exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM event_application_backup_receipts
+            WHERE tenant_id = $1
+              AND event_application_id = $2
+              AND receipt_kind = 'operator_backup_notification'
+        )
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(application_uuid)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_status)?;
+    Ok(exists)
+}
+
+async fn insert_backup_receipt(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    application_id: &str,
+    payload: Value,
+) -> Result<bool, Status> {
+    let application_uuid = parse_uuid(application_id, "event_application_id")?;
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO event_application_backup_receipts (
+            tenant_id,
+            event_application_id,
+            receipt_kind,
+            status,
+            payload_json
+        )
+        VALUES ($1, $2, 'operator_backup_notification', 'pending', $3)
+        ON CONFLICT (tenant_id, event_application_id, receipt_kind)
+        DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(application_uuid)
+    .bind(SqlJson(payload))
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_status)?
+    .is_some();
+
+    if inserted {
+        return Ok(true);
+    }
+    backup_receipt_exists(tx, tenant_id, application_id).await
 }
 
 fn require_slug(slug: &str) -> Result<&str, Status> {
@@ -1610,4 +2036,112 @@ fn ms_to_offset_datetime(ms: i64) -> Option<OffsetDateTime> {
         return None;
     }
     OffsetDateTime::from_unix_timestamp_nanos((ms as i128) * 1_000_000).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tonic::Code;
+
+    #[test]
+    fn application_category_aliases_normalize_to_civic_object_categories() {
+        let cases = [
+            ("Musician", "musician"),
+            ("music", "musician"),
+            ("band", "musician"),
+            ("vendor", "vendor"),
+            ("performer", "entertainer"),
+            ("organization", "other"),
+            ("community", "other"),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(require_application_category(raw).unwrap(), expected);
+        }
+
+        let error = require_application_category("sponsor").unwrap_err();
+        assert_eq!(error.code(), Code::InvalidArgument);
+        assert_eq!(
+            error.message(),
+            "category must be one of musician, vendor, entertainer, other"
+        );
+    }
+
+    #[test]
+    fn application_source_key_is_retry_stable_and_email_is_normalized() {
+        let email = require_email("  VENDOR@Example.COM  ").unwrap();
+        assert_eq!(email, "vendor@example.com");
+        assert_eq!(
+            normalize_application_source_key("", "vendor", &email),
+            "public:vendor:vendor@example.com"
+        );
+        assert_eq!(
+            normalize_application_source_key(" formspree:abc123 ", "vendor", &email),
+            "formspree:abc123"
+        );
+
+        let error = require_email("missing-at-sign").unwrap_err();
+        assert_eq!(error.code(), Code::InvalidArgument);
+        assert_eq!(error.message(), "contact_email must be a valid email");
+    }
+
+    #[test]
+    fn category_payload_must_be_a_json_object() {
+        assert_eq!(
+            parse_json_object("", "category_payload_json").unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            parse_json_object(
+                r#"{"foodType":["Coney / Hot Dogs"]}"#,
+                "category_payload_json"
+            )
+            .unwrap(),
+            json!({"foodType": ["Coney / Hot Dogs"]})
+        );
+
+        let array_error =
+            parse_json_object(r#"["not","an","object"]"#, "category_payload_json").unwrap_err();
+        assert_eq!(array_error.code(), Code::InvalidArgument);
+        assert_eq!(
+            array_error.message(),
+            "category_payload_json must be a JSON object"
+        );
+
+        let parse_error = parse_json_object("{", "category_payload_json").unwrap_err();
+        assert_eq!(parse_error.code(), Code::InvalidArgument);
+        assert!(
+            parse_error
+                .message()
+                .starts_with("category_payload_json must be valid JSON:"),
+            "{}",
+            parse_error.message()
+        );
+    }
+
+    #[test]
+    fn default_planning_payload_keeps_payment_out_of_intake_path() {
+        let payload = default_application_planning_payload();
+        assert_eq!(payload["status"], "submitted");
+        assert_eq!(payload["accepted"], false);
+        assert_eq!(payload["contacted"], false);
+        assert_eq!(payload["paid"], false);
+        assert!(payload["fee"].is_null());
+        assert!(payload["payment_to_band"].is_null());
+        assert!(payload["location"].is_null());
+        assert!(payload["set_time"].is_null());
+        assert!(payload.get("square").is_none());
+        assert!(payload.get("checkout").is_none());
+        assert!(payload.get("payment_required").is_none());
+    }
+
+    #[test]
+    fn submitted_at_ms_zero_means_server_capture_time() {
+        assert!(ms_to_offset_datetime(0).is_none());
+        assert!(ms_to_offset_datetime(-1).is_none());
+
+        let timestamp = ms_to_offset_datetime(1_786_112_800_123).unwrap();
+        assert_eq!(timestamp.unix_timestamp(), 1_786_112_800);
+        assert_eq!(timestamp.millisecond(), 123);
+    }
 }

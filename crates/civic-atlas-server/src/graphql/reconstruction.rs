@@ -520,16 +520,12 @@ fn evidence_from_pipeline(
     if let Some(bundle) = engine_bundle {
         for artifact in &bundle.direct {
             items.push(evidence_item_from_engine_artifact(
-                artifact,
-                &spec_id,
-                /* relation */ "direct",
+                artifact, &spec_id, /* relation */ "direct",
             ));
         }
         for artifact in &bundle.adjacent {
             items.push(evidence_item_from_engine_artifact(
-                artifact,
-                &spec_id,
-                /* relation */ "adjacent",
+                artifact, &spec_id, /* relation */ "adjacent",
             ));
         }
     }

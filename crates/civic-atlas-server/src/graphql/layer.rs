@@ -266,13 +266,19 @@ impl LayerQuery {
         match reconstruction_layer(state).await {
             Ok(layer) => layers.push(layer),
             Err(error) => {
-                tracing::warn!(?error, "layers(): reconstruction producer unavailable; skipping")
+                tracing::warn!(
+                    ?error,
+                    "layers(): reconstruction producer unavailable; skipping"
+                )
             }
         }
         match event_surface_layers(state, &tenant_slug).await {
             Ok(event_layers) => layers.extend(event_layers),
             Err(error) => {
-                tracing::warn!(?error, "layers(): event-surface producer unavailable; skipping")
+                tracing::warn!(
+                    ?error,
+                    "layers(): event-surface producer unavailable; skipping"
+                )
             }
         }
 

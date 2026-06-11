@@ -85,6 +85,71 @@ message EventLayerListResponse {
   repeated EventLayer layers = 1;
 }
 
+// ---- Applications / civic objects ------------------------------------
+
+message EventApplication {
+  string id = 1;
+  string event_layer_id = 2;
+  string category = 3;
+  string display_name = 4;
+  string contact_name = 5;
+  string contact_email = 6;
+  string contact_phone = 7;
+  string city = 8;
+  string bio = 9;
+  bool flint_based = 10;
+  string access_needs = 11;
+  string category_payload_json = 12;
+  string planning_payload_json = 13;
+  string status = 14;
+  string location_geojson = 15;
+  int64 set_time_ms = 16;
+  string source_key = 17;
+  int64 created_at_ms = 18;
+  int64 updated_at_ms = 19;
+  int64 version = 20;
+}
+
+message EventApplicationListRequest {
+  TenantContext tenant_context = 1;
+  string event_layer_slug = 2;
+  string category = 3;
+  string status = 4;
+}
+
+message EventApplicationListResponse {
+  repeated EventApplication applications = 1;
+}
+
+message EventApplicationSubmitRequest {
+  TenantContext tenant_context = 1;
+  string event_layer_slug = 2;
+  string category = 3;
+  string display_name = 4;
+  string contact_name = 5;
+  string contact_email = 6;
+  string contact_phone = 7;
+  string city = 8;
+  string bio = 9;
+  bool flint_based = 10;
+  string access_needs = 11;
+  string category_payload_json = 12;
+  // Optional idempotency key from the public form or import job. When
+  // empty the server derives one from category + contact email so a
+  // browser retry does not multiply rows.
+  string source_key = 13;
+  // Optional original submission timestamp for private Formspree imports.
+  // Live public submits send 0 and use server capture time.
+  int64 submitted_at_ms = 14;
+}
+
+message EventApplicationSubmitResponse {
+  EventApplication application = 1;
+  bool created = 2;
+  bool duplicate = 3;
+  bool backup_recorded = 4;
+}
+
 // ---- ListPlacements ---------------------------------------------------
 
 message PlacementListRequest {
@@ -405,6 +470,8 @@ message IntakePendingVendorResponse {
 
 service EventPlannerService {
   rpc ListEventLayers(EventLayerListRequest) returns (EventLayerListResponse);
+  rpc ListEventApplications(EventApplicationListRequest) returns (EventApplicationListResponse);
+  rpc SubmitEventApplication(EventApplicationSubmitRequest) returns (EventApplicationSubmitResponse);
   rpc ListPlacements(PlacementListRequest) returns (PlacementListResponse);
   rpc ListTasks(TaskListRequest) returns (TaskListResponse);
 

@@ -10,6 +10,7 @@ use async_graphql::{Context, InputObject, MaybeUndefined, Object, SimpleObject};
 use chrono::{DateTime, Utc};
 use civic_atlas_types::civic_atlas::v1::TenantContext;
 use civic_atlas_types::event_planner::{
+    EventApplicationListRequest, EventApplicationSubmitRequest, EventApplicationSubmitResponse,
     EventLayerListRequest, EventPlannerService, PlacementCreateRequest, PlacementDeleteRequest,
     PlacementListRequest, PlacementMutationResponse, PlacementUpdateRequest, TaskCreateRequest,
     TaskDeleteRequest, TaskListRequest, TaskMutationResponse, TaskUpdateRequest,
@@ -32,6 +33,30 @@ pub struct EventLayer {
     pub title: String,
     pub starts_at: Option<String>,
     pub ends_at: Option<String>,
+}
+
+#[derive(SimpleObject, Default, Clone)]
+pub struct EventApplication {
+    pub id: String,
+    pub event_layer_id: String,
+    pub category: String,
+    pub display_name: String,
+    pub contact_name: Option<String>,
+    pub contact_email: String,
+    pub contact_phone: Option<String>,
+    pub city: Option<String>,
+    pub bio: Option<String>,
+    pub flint_based: bool,
+    pub access_needs: Option<String>,
+    pub category_payload: async_graphql::Json<Value>,
+    pub planning_payload: async_graphql::Json<Value>,
+    pub status: String,
+    pub location: async_graphql::Json<Value>,
+    pub set_time: Option<String>,
+    pub source_key: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub version: i32,
 }
 
 #[derive(SimpleObject, Default, Clone)]
@@ -73,6 +98,31 @@ pub struct TaskMutationResult {
     pub task: Option<EventTask>,
     pub stale_write: bool,
     pub deleted: bool,
+}
+
+#[derive(SimpleObject, Default, Clone)]
+pub struct EventApplicationSubmitResult {
+    pub application: Option<EventApplication>,
+    pub created: bool,
+    pub duplicate: bool,
+    pub backup_recorded: bool,
+}
+
+#[derive(InputObject)]
+pub struct EventApplicationSubmitInput {
+    pub event_slug: String,
+    pub category: String,
+    pub display_name: String,
+    pub contact_name: Option<String>,
+    pub contact_email: String,
+    pub contact_phone: Option<String>,
+    pub city: Option<String>,
+    pub bio: Option<String>,
+    pub flint_based: Option<bool>,
+    pub access_needs: Option<String>,
+    pub category_payload: Option<async_graphql::Json<Value>>,
+    pub source_key: Option<String>,
+    pub submitted_at_ms: Option<i64>,
 }
 
 #[derive(InputObject)]
@@ -154,6 +204,33 @@ impl EventPlannerQuery {
         Ok(response.layers.into_iter().map(map_event_layer).collect())
     }
 
+    async fn event_applications(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(default = "flint")] tenant_slug: String,
+        event_slug: String,
+        category: Option<String>,
+        status: Option<String>,
+    ) -> async_graphql::Result<Vec<EventApplication>> {
+        let service = service(ctx)?;
+        let response = service
+            .list_event_applications(Request::new(EventApplicationListRequest {
+                tenant_context: Some(tenant_context(&tenant_slug)),
+                event_layer_slug: event_slug,
+                category: category.unwrap_or_default(),
+                status: status.unwrap_or_default(),
+            }))
+            .await
+            .map_err(graphql_status)?
+            .into_inner();
+
+        Ok(response
+            .applications
+            .into_iter()
+            .map(map_application)
+            .collect())
+    }
+
     async fn placements(
         &self,
         ctx: &Context<'_>,
@@ -197,6 +274,38 @@ pub struct EventPlannerMutation;
 
 #[Object]
 impl EventPlannerMutation {
+    async fn submit_event_application(
+        &self,
+        ctx: &Context<'_>,
+        input: EventApplicationSubmitInput,
+    ) -> async_graphql::Result<EventApplicationSubmitResult> {
+        let response = service(ctx)?
+            .submit_event_application(Request::new(EventApplicationSubmitRequest {
+                tenant_context: Some(default_tenant_context()),
+                event_layer_slug: input.event_slug,
+                category: input.category,
+                display_name: input.display_name,
+                contact_name: input.contact_name.unwrap_or_default(),
+                contact_email: input.contact_email,
+                contact_phone: input.contact_phone.unwrap_or_default(),
+                city: input.city.unwrap_or_default(),
+                bio: input.bio.unwrap_or_default(),
+                flint_based: input.flint_based.unwrap_or(false),
+                access_needs: input.access_needs.unwrap_or_default(),
+                category_payload_json: input
+                    .category_payload
+                    .map(json_to_string)
+                    .unwrap_or_else(|| "{}".to_string()),
+                source_key: input.source_key.unwrap_or_default(),
+                submitted_at_ms: input.submitted_at_ms.unwrap_or_default(),
+            }))
+            .await
+            .map_err(graphql_status)?
+            .into_inner();
+
+        Ok(map_application_submit(response))
+    }
+
     async fn create_placement(
         &self,
         ctx: &Context<'_>,
@@ -456,6 +565,13 @@ fn geometry_json(value: &str) -> async_graphql::Json<Value> {
     }
 }
 
+fn object_json(value: &str) -> async_graphql::Json<Value> {
+    match serde_json::from_str::<Value>(value) {
+        Ok(value) if value.is_object() => async_graphql::Json(value),
+        _ => async_graphql::Json(json!({})),
+    }
+}
+
 fn timestamp_to_iso(ms: i64) -> Option<String> {
     if ms <= 0 {
         return None;
@@ -492,6 +608,33 @@ fn map_event_layer(layer: civic_atlas_types::event_planner::EventLayer) -> Event
     }
 }
 
+fn map_application(
+    application: civic_atlas_types::event_planner::EventApplication,
+) -> EventApplication {
+    EventApplication {
+        id: application.id,
+        event_layer_id: application.event_layer_id,
+        category: application.category,
+        display_name: application.display_name,
+        contact_name: empty_to_none(application.contact_name),
+        contact_email: application.contact_email,
+        contact_phone: empty_to_none(application.contact_phone),
+        city: empty_to_none(application.city),
+        bio: empty_to_none(application.bio),
+        flint_based: application.flint_based,
+        access_needs: empty_to_none(application.access_needs),
+        category_payload: object_json(&application.category_payload_json),
+        planning_payload: object_json(&application.planning_payload_json),
+        status: application.status,
+        location: geometry_json(&application.location_geojson),
+        set_time: timestamp_to_iso(application.set_time_ms),
+        source_key: application.source_key,
+        created_at: timestamp_to_iso(application.created_at_ms),
+        updated_at: timestamp_to_iso(application.updated_at_ms),
+        version: version_i32(application.version),
+    }
+}
+
 fn map_placement(placement: civic_atlas_types::event_planner::Placement) -> Placement {
     Placement {
         id: placement.id,
@@ -518,6 +661,17 @@ fn map_task(task: civic_atlas_types::event_planner::Task) -> EventTask {
         placement_id: empty_to_none(task.placement_id),
         notes: empty_to_none(task.notes),
         version: version_i32(task.version),
+    }
+}
+
+fn map_application_submit(
+    response: EventApplicationSubmitResponse,
+) -> EventApplicationSubmitResult {
+    EventApplicationSubmitResult {
+        application: response.application.map(map_application),
+        created: response.created,
+        duplicate: response.duplicate,
+        backup_recorded: response.backup_recorded,
     }
 }
 

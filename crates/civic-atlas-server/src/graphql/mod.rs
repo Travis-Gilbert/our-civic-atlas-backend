@@ -406,6 +406,9 @@ mod tests {
         let sdl = build_schema(state).sdl();
 
         assert!(sdl.contains("eventLayers"));
+        assert!(sdl.contains("eventApplications"));
+        assert!(sdl.contains("submitEventApplication"));
+        assert!(sdl.contains("submittedAtMs"));
         assert!(sdl.contains("placements"));
         assert!(sdl.contains("createPlacement"));
         assert!(sdl.contains("updatePlacement"));

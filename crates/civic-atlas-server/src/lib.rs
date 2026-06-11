@@ -400,7 +400,10 @@ impl CivicAtlasService for CivicAtlasGrpcService {
                 max_lat: bbox.max_lat,
                 max_lon: bbox.max_lon,
             };
-            match rustyred.spatial_bounding_box(tenant.as_str(), &bbox_req).await {
+            match rustyred
+                .spatial_bounding_box(tenant.as_str(), &bbox_req)
+                .await
+            {
                 Ok(bbox_resp) => {
                     let in_box: HashSet<String> = bbox_resp.node_ids.into_iter().collect();
                     hits.retain(|hit| {
@@ -656,9 +659,8 @@ impl ResearchScope {
                 .map(|s| s.to_string())
                 .filter(|s| !s.is_empty())
         };
-        let f64_field = |key: &str| -> Option<f64> {
-            obj.and_then(|o| o.get(key)).and_then(Value::as_f64)
-        };
+        let f64_field =
+            |key: &str| -> Option<f64> { obj.and_then(|o| o.get(key)).and_then(Value::as_f64) };
 
         let property = str_field("property").unwrap_or_else(|| Self::DEFAULT_PROPERTY.to_string());
         let label = str_field("label");
@@ -945,10 +947,43 @@ fn is_rustyred_store_unavailable(err: &RustyRedError) -> bool {
 /// "STREET"), so a literal LIKE on the spelled-out word would miss; the city /
 /// state are dropped because the layer is already Flint-scoped.
 const ARCGIS_STOPWORDS: &[&str] = &[
-    "flint", "michigan", "mi", "usa", "street", "st", "avenue", "ave", "road", "rd", "drive",
-    "dr", "lane", "ln", "boulevard", "blvd", "court", "ct", "place", "pl", "circle", "cir",
-    "way", "terrace", "ter", "highway", "hwy", "parkway", "pkwy", "n", "s", "e", "w", "north",
-    "south", "east", "west",
+    "flint",
+    "michigan",
+    "mi",
+    "usa",
+    "street",
+    "st",
+    "avenue",
+    "ave",
+    "road",
+    "rd",
+    "drive",
+    "dr",
+    "lane",
+    "ln",
+    "boulevard",
+    "blvd",
+    "court",
+    "ct",
+    "place",
+    "pl",
+    "circle",
+    "cir",
+    "way",
+    "terrace",
+    "ter",
+    "highway",
+    "hwy",
+    "parkway",
+    "pkwy",
+    "n",
+    "s",
+    "e",
+    "w",
+    "north",
+    "south",
+    "east",
+    "west",
 ];
 
 /// Build a portable ArcGIS WHERE clause from a free-text query. Tokenizes the
@@ -1055,7 +1090,10 @@ async fn fetch_arcgis_new_evidence(query: &str) -> Vec<Value> {
         {
             Ok(response) if response.status().is_success() => response,
             Ok(response) => {
-                warn!(status = response.status().as_u16(), endpoint, "arcgis: non-2xx");
+                warn!(
+                    status = response.status().as_u16(),
+                    endpoint, "arcgis: non-2xx"
+                );
                 continue;
             }
             Err(err) => {
@@ -1123,10 +1161,32 @@ async fn fetch_arcgis_new_evidence(query: &str) -> Vec<Value> {
 /// every Flint parcel).
 fn arcgis_pick_title(attributes: &serde_json::Map<String, Value>) -> String {
     for key in [
-        "Full_Prop", "FULL_PROP", "NAME", "Name", "name", "BUILDING_NAME", "Building_Name",
-        "ADDRESS", "Address", "address", "Prop_Add", "SITE_ADDRESS", "SiteAddress",
-        "site_address", "Prop_Stree", "STREETNAME", "StreetName", "street_name", "PARCEL_ID",
-        "ParcelID", "parcel_id", "PIDdash", "PIDText", "PIN", "Pin", "pin",
+        "Full_Prop",
+        "FULL_PROP",
+        "NAME",
+        "Name",
+        "name",
+        "BUILDING_NAME",
+        "Building_Name",
+        "ADDRESS",
+        "Address",
+        "address",
+        "Prop_Add",
+        "SITE_ADDRESS",
+        "SiteAddress",
+        "site_address",
+        "Prop_Stree",
+        "STREETNAME",
+        "StreetName",
+        "street_name",
+        "PARCEL_ID",
+        "ParcelID",
+        "parcel_id",
+        "PIDdash",
+        "PIDText",
+        "PIN",
+        "Pin",
+        "pin",
     ] {
         if let Some(value) = attributes.get(key) {
             let text = arcgis_attr_str(value);
@@ -1161,8 +1221,21 @@ fn arcgis_pick_title(attributes: &serde_json::Map<String, Value>) -> String {
 fn arcgis_snippet(attributes: &serde_json::Map<String, Value>) -> String {
     let mut parts: Vec<String> = Vec::new();
     for key in [
-        "Tx_PayName", "OWNER", "Owner", "Use_Type", "USE", "Use", "Prop_Class", "PROPCLASS",
-        "PropClass", "Year_Built", "YEAR_BUILT", "YearBuilt", "Prop_Add", "ADDRESS", "Address",
+        "Tx_PayName",
+        "OWNER",
+        "Owner",
+        "Use_Type",
+        "USE",
+        "Use",
+        "Prop_Class",
+        "PROPCLASS",
+        "PropClass",
+        "Year_Built",
+        "YEAR_BUILT",
+        "YearBuilt",
+        "Prop_Add",
+        "ADDRESS",
+        "Address",
     ] {
         if parts.len() >= 4 {
             break;
@@ -1276,8 +1349,13 @@ fn osm_snippet(tags: Option<&serde_json::Map<String, Value>>) -> String {
     };
     let mut parts: Vec<String> = Vec::new();
     for key in [
-        "building", "amenity", "historic", "addr:street", "addr:housenumber",
-        "start_date", "description",
+        "building",
+        "amenity",
+        "historic",
+        "addr:street",
+        "addr:housenumber",
+        "start_date",
+        "description",
     ] {
         if parts.len() >= 6 {
             break;
@@ -1407,10 +1485,7 @@ fn project_fulltext_hit(
     let props = node.map(|n| &n.properties);
     let prop_str = |keys: &[&str]| -> String {
         props
-            .and_then(|p| {
-                keys.iter()
-                    .find_map(|k| p.get(*k).and_then(Value::as_str))
-            })
+            .and_then(|p| keys.iter().find_map(|k| p.get(*k).and_then(Value::as_str)))
             .unwrap_or("")
             .to_string()
     };
