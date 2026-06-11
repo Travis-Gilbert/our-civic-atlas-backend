@@ -150,6 +150,42 @@ message EventApplicationSubmitResponse {
   bool backup_recorded = 4;
 }
 
+message EventApplicationBilling {
+  string id = 1;
+  string event_application_id = 2;
+  string provider = 3;
+  string status = 4;
+  int64 amount_cents = 5;
+  string currency = 6;
+  string payment_link_url = 7;
+  string provider_payment_link_id = 8;
+  string provider_order_id = 9;
+  string idempotency_key = 10;
+  int64 created_at_ms = 11;
+  int64 updated_at_ms = 12;
+}
+
+message EventApplicationBillingRequest {
+  TenantContext tenant_context = 1;
+  string event_application_id = 2;
+  int64 amount_cents = 3;
+  string currency = 4;
+  string description = 5;
+  string redirect_url = 6;
+  string actor_user_id = 7;
+  // Optional idempotency key. When empty the server derives one from
+  // event_application_id + amount + currency, so retries return the
+  // same Square payment link record instead of creating duplicates.
+  string idempotency_key = 8;
+}
+
+message EventApplicationBillingResponse {
+  EventApplicationBilling billing = 1;
+  EventApplication application = 2;
+  bool created = 3;
+  bool square_requested = 4;
+}
+
 // ---- ListPlacements ---------------------------------------------------
 
 message PlacementListRequest {
@@ -472,6 +508,7 @@ service EventPlannerService {
   rpc ListEventLayers(EventLayerListRequest) returns (EventLayerListResponse);
   rpc ListEventApplications(EventApplicationListRequest) returns (EventApplicationListResponse);
   rpc SubmitEventApplication(EventApplicationSubmitRequest) returns (EventApplicationSubmitResponse);
+  rpc RequestEventApplicationBilling(EventApplicationBillingRequest) returns (EventApplicationBillingResponse);
   rpc ListPlacements(PlacementListRequest) returns (PlacementListResponse);
   rpc ListTasks(TaskListRequest) returns (TaskListResponse);
 

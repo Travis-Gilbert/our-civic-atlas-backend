@@ -408,6 +408,7 @@ mod tests {
         assert!(sdl.contains("eventLayers"));
         assert!(sdl.contains("eventApplications"));
         assert!(sdl.contains("submitEventApplication"));
+        assert!(sdl.contains("requestEventApplicationBilling"));
         assert!(sdl.contains("submittedAtMs"));
         assert!(sdl.contains("placements"));
         assert!(sdl.contains("createPlacement"));

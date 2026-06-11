@@ -28,6 +28,8 @@
 
 #![allow(clippy::result_large_err)]
 
+use std::env;
+
 use civic_atlas_types::civic_atlas::v1::{
     AuthClaimInviteRequest, AuthClaimInviteResponse, AuthResolveSessionRequest,
     AuthResolveSessionResponse, AuthRevokeSessionRequest, AuthRevokeSessionResponse,
@@ -35,6 +37,7 @@ use civic_atlas_types::civic_atlas::v1::{
 use civic_atlas_types::event_planner::{
     BookmarkCreateRequest, BookmarkDeleteRequest, BookmarkListRequest, BookmarkListResponse,
     BookmarkMutationResponse, BookmarkUpdateRequest, CameraBookmark, EventApplication,
+    EventApplicationBilling, EventApplicationBillingRequest, EventApplicationBillingResponse,
     EventApplicationListRequest, EventApplicationListResponse, EventApplicationSubmitRequest,
     EventApplicationSubmitResponse, EventLayer, EventLayerListRequest, EventLayerListResponse,
     EventPlannerService, IntakePendingVendorRequest, IntakePendingVendorResponse, Placement,
@@ -58,6 +61,23 @@ use crate::AtlasState;
 pub const NO_LOGIN_PLANNER_ACTOR_ID: &str = "00000000-0000-4000-8000-000000000001";
 const NO_LOGIN_PLANNER_EMAIL: &str = "porchfest-crew@ourcivicatlas.local";
 const NO_LOGIN_PLANNER_DISPLAY_NAME: &str = "Porchfest Crew";
+const DEFAULT_SQUARE_VERSION: &str = "2025-01-23";
+
+#[derive(Debug, Clone)]
+struct SquareCheckoutConfig {
+    access_token: String,
+    location_id: String,
+    base_url: String,
+    square_version: String,
+}
+
+#[derive(Debug, Clone)]
+struct SquarePaymentLinkResult {
+    url: String,
+    payment_link_id: String,
+    order_id: String,
+    response_payload: Value,
+}
 
 #[derive(Clone)]
 pub struct EventPlannerGrpcService {
@@ -334,6 +354,199 @@ impl EventPlannerService for EventPlannerGrpcService {
             created: true,
             duplicate: false,
             backup_recorded,
+        }))
+    }
+
+    async fn request_event_application_billing(
+        &self,
+        request: Request<EventApplicationBillingRequest>,
+    ) -> Result<Response<EventApplicationBillingResponse>, Status> {
+        let req = request.into_inner();
+        let tenant = require_tenant_context(req.tenant_context.as_ref())
+            .map_err(|err| Status::unauthenticated(err.to_string()))?;
+        require_actor(&req.actor_user_id)?;
+        let application_uuid = parse_uuid(&req.event_application_id, "event_application_id")?;
+        let amount_cents = require_positive_amount(req.amount_cents)?;
+        let currency = normalize_currency(&req.currency)?;
+        let idempotency_key = normalize_billing_idempotency_key(
+            &req.idempotency_key,
+            application_uuid,
+            amount_cents,
+            &currency,
+        );
+
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await.map_err(db_status)?;
+        let tenant_id = resolve_tenant_id(&mut tx, tenant.as_str()).await?;
+        set_transaction_tenant(&mut tx, tenant_id).await?;
+        let actor_uuid = resolve_actor_uuid(&mut tx, tenant_id, &req.actor_user_id).await?;
+
+        let application_sql = application_select_sql(
+            r#"
+            FROM event_applications a
+            WHERE a.tenant_id = $1
+              AND a.id = $2
+            "#,
+        );
+        let application_row = sqlx::query(&application_sql)
+            .bind(tenant_id)
+            .bind(application_uuid)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_status)?
+            .ok_or_else(|| Status::not_found("event application not found"))?;
+        let application = application_from_row(&application_row);
+
+        let existing_sql = billing_select_sql(
+            r#"
+            FROM event_application_billing_requests b
+            WHERE b.tenant_id = $1
+              AND b.event_application_id = $2
+              AND b.provider = 'square'
+              AND b.idempotency_key = $3
+            "#,
+        );
+        let existing = sqlx::query(&existing_sql)
+            .bind(tenant_id)
+            .bind(application_uuid)
+            .bind(&idempotency_key)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_status)?;
+        if let Some(row) = existing {
+            tx.commit().await.map_err(db_status)?;
+            return Ok(Response::new(EventApplicationBillingResponse {
+                billing: Some(billing_from_row(&row)),
+                application: Some(application),
+                created: false,
+                square_requested: false,
+            }));
+        }
+        tx.commit().await.map_err(db_status)?;
+
+        let config = square_checkout_config_from_env()?;
+        let description = normalize_billing_description(&req.description, &application);
+        let request_payload = square_payment_link_payload(
+            &config.location_id,
+            &idempotency_key,
+            amount_cents,
+            &currency,
+            &description,
+            req.redirect_url.trim(),
+        );
+        let square_link = create_square_payment_link(&config, &request_payload).await?;
+
+        let mut tx = pool.begin().await.map_err(db_status)?;
+        let tenant_id = resolve_tenant_id(&mut tx, tenant.as_str()).await?;
+        set_transaction_tenant(&mut tx, tenant_id).await?;
+
+        let insert_sql = format!(
+            r#"
+            WITH inserted AS (
+              INSERT INTO event_application_billing_requests (
+                  tenant_id,
+                  event_application_id,
+                  provider,
+                  status,
+                  amount_cents,
+                  currency,
+                  payment_link_url,
+                  provider_payment_link_id,
+                  provider_order_id,
+                  idempotency_key,
+                  request_payload_json,
+                  response_payload_json,
+                  created_by
+              )
+              VALUES (
+                  $1, $2, 'square', 'payment_link_created', $3, $4, $5, $6,
+                  NULLIF($7, ''), $8, $9, $10, $11
+              )
+              ON CONFLICT (tenant_id, event_application_id, provider, idempotency_key)
+              DO NOTHING
+              RETURNING *
+            )
+            {}
+            "#,
+            billing_select_sql("FROM inserted b")
+        );
+        let inserted = sqlx::query(&insert_sql)
+            .bind(tenant_id)
+            .bind(application_uuid)
+            .bind(amount_cents)
+            .bind(&currency)
+            .bind(&square_link.url)
+            .bind(&square_link.payment_link_id)
+            .bind(&square_link.order_id)
+            .bind(&idempotency_key)
+            .bind(SqlJson(request_payload.clone()))
+            .bind(SqlJson(square_link.response_payload.clone()))
+            .bind(actor_uuid)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_status)?;
+
+        let (billing, created) = if let Some(row) = inserted {
+            (billing_from_row(&row), true)
+        } else {
+            let existing = sqlx::query(&existing_sql)
+                .bind(tenant_id)
+                .bind(application_uuid)
+                .bind(&idempotency_key)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(db_status)?;
+            (billing_from_row(&existing), false)
+        };
+
+        let current_payload: SqlJson<Value> = sqlx::query_scalar(
+            r#"
+            SELECT planning_payload_json
+            FROM event_applications
+            WHERE tenant_id = $1
+              AND id = $2
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(application_uuid)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_status)?;
+        let patched_payload = billing_planning_payload(current_payload.0, &billing);
+        sqlx::query(
+            r#"
+            UPDATE event_applications
+            SET
+                planning_payload_json = $3,
+                status = CASE
+                    WHEN status IN ('submitted', 'accepted') THEN 'payment_requested'
+                    ELSE status
+                END
+            WHERE tenant_id = $1
+              AND id = $2
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(application_uuid)
+        .bind(SqlJson(patched_payload))
+        .execute(&mut *tx)
+        .await
+        .map_err(db_status)?;
+
+        let application_row = sqlx::query(&application_sql)
+            .bind(tenant_id)
+            .bind(application_uuid)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_status)?;
+        let application = application_from_row(&application_row);
+        tx.commit().await.map_err(db_status)?;
+
+        Ok(Response::new(EventApplicationBillingResponse {
+            billing: Some(billing),
+            application: Some(application),
+            created,
+            square_requested: true,
         }))
     }
 
@@ -1609,6 +1822,35 @@ fn application_from_row(row: &PgRow) -> EventApplication {
     }
 }
 
+fn billing_from_row(row: &PgRow) -> EventApplicationBilling {
+    EventApplicationBilling {
+        id: row.get::<Uuid, _>("id").to_string(),
+        event_application_id: row.get::<Uuid, _>("event_application_id").to_string(),
+        provider: row.get::<String, _>("provider"),
+        status: row.get::<String, _>("status"),
+        amount_cents: row.get::<i64, _>("amount_cents"),
+        currency: row.get::<String, _>("currency"),
+        payment_link_url: row
+            .try_get::<Option<String>, _>("payment_link_url")
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        provider_payment_link_id: row
+            .try_get::<Option<String>, _>("provider_payment_link_id")
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        provider_order_id: row
+            .try_get::<Option<String>, _>("provider_order_id")
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        idempotency_key: row.get::<String, _>("idempotency_key"),
+        created_at_ms: ts_ms(row, "created_at"),
+        updated_at_ms: ts_ms(row, "updated_at"),
+    }
+}
+
 fn placement_from_row(row: &PgRow) -> Placement {
     Placement {
         id: row.get::<Uuid, _>("id").to_string(),
@@ -1761,6 +2003,27 @@ fn application_select_sql(from_where: &str) -> String {
     )
 }
 
+fn billing_select_sql(from_where: &str) -> String {
+    format!(
+        r#"
+        SELECT
+            b.id,
+            b.event_application_id,
+            b.provider,
+            b.status,
+            b.amount_cents,
+            b.currency,
+            b.payment_link_url,
+            b.provider_payment_link_id,
+            b.provider_order_id,
+            b.idempotency_key,
+            b.created_at,
+            b.updated_at
+        {from_where}
+        "#
+    )
+}
+
 fn json_column(row: &PgRow, column: &str) -> String {
     row.try_get::<SqlJson<Value>, _>(column)
         .map(|value| value.0.to_string())
@@ -1778,6 +2041,186 @@ fn default_application_planning_payload() -> Value {
         "set_time": null,
         "status": "submitted",
     })
+}
+
+fn require_positive_amount(amount_cents: i64) -> Result<i64, Status> {
+    if amount_cents <= 0 {
+        return Err(Status::invalid_argument("amount_cents must be > 0"));
+    }
+    Ok(amount_cents)
+}
+
+fn normalize_currency(currency: &str) -> Result<String, Status> {
+    let normalized = if currency.trim().is_empty() {
+        "USD".to_string()
+    } else {
+        currency.trim().to_ascii_uppercase()
+    };
+    if normalized.len() != 3 || !normalized.chars().all(|ch| ch.is_ascii_uppercase()) {
+        return Err(Status::invalid_argument(
+            "currency must be a three-letter ISO currency code",
+        ));
+    }
+    Ok(normalized)
+}
+
+fn normalize_billing_idempotency_key(
+    raw: &str,
+    application_id: Uuid,
+    amount_cents: i64,
+    currency: &str,
+) -> String {
+    let trimmed = raw.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    format!("event-application-billing:{application_id}:{amount_cents}:{currency}")
+}
+
+fn normalize_billing_description(description: &str, application: &EventApplication) -> String {
+    let trimmed = description.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    format!(
+        "PorchFest 2026 application fee - {}",
+        application.display_name
+    )
+}
+
+fn square_checkout_config_from_env() -> Result<SquareCheckoutConfig, Status> {
+    let access_token = env::var("SQUARE_ACCESS_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| Status::failed_precondition("SQUARE_ACCESS_TOKEN is required"))?;
+    let location_id = env::var("SQUARE_LOCATION_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| Status::failed_precondition("SQUARE_LOCATION_ID is required"))?;
+    let square_version = env::var("SQUARE_VERSION")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_SQUARE_VERSION.to_string());
+    let base_url = env::var("SQUARE_BASE_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            match env::var("SQUARE_ENVIRONMENT")
+                .unwrap_or_else(|_| "sandbox".to_string())
+                .trim()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "production" | "prod" => "https://connect.squareup.com".to_string(),
+                _ => "https://connect.squareupsandbox.com".to_string(),
+            }
+        });
+    Ok(SquareCheckoutConfig {
+        access_token,
+        location_id,
+        base_url,
+        square_version,
+    })
+}
+
+fn square_payment_link_payload(
+    location_id: &str,
+    idempotency_key: &str,
+    amount_cents: i64,
+    currency: &str,
+    description: &str,
+    redirect_url: &str,
+) -> Value {
+    let mut payload = json!({
+        "idempotency_key": idempotency_key,
+        "quick_pay": {
+            "name": description,
+            "price_money": {
+                "amount": amount_cents,
+                "currency": currency,
+            },
+            "location_id": location_id,
+        },
+    });
+    if !redirect_url.is_empty() {
+        payload["checkout_options"] = json!({ "redirect_url": redirect_url });
+    }
+    payload
+}
+
+async fn create_square_payment_link(
+    config: &SquareCheckoutConfig,
+    payload: &Value,
+) -> Result<SquarePaymentLinkResult, Status> {
+    let url = format!("{}/v2/online-checkout/payment-links", config.base_url);
+    let response = reqwest::Client::new()
+        .post(url)
+        .header("Square-Version", &config.square_version)
+        .bearer_auth(&config.access_token)
+        .json(payload)
+        .send()
+        .await
+        .map_err(|err| Status::unavailable(format!("Square request failed: {err}")))?;
+    let status = response.status();
+    let response_payload = response
+        .json::<Value>()
+        .await
+        .unwrap_or_else(|_| json!({ "error": "Square response was not JSON" }));
+    if !status.is_success() {
+        return Err(Status::unavailable(format!(
+            "Square payment link request failed: {status} {response_payload}"
+        )));
+    }
+    let payment_link = response_payload
+        .get("payment_link")
+        .and_then(Value::as_object)
+        .ok_or_else(|| Status::unavailable("Square response missing payment_link"))?;
+    let url = payment_link
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| Status::unavailable("Square response missing payment_link.url"))?
+        .to_string();
+    let payment_link_id = payment_link
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let order_id = payment_link
+        .get("order_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Ok(SquarePaymentLinkResult {
+        url,
+        payment_link_id,
+        order_id,
+        response_payload,
+    })
+}
+
+fn billing_planning_payload(mut payload: Value, billing: &EventApplicationBilling) -> Value {
+    if !payload.is_object() {
+        payload = json!({});
+    }
+    payload["paid"] = json!(false);
+    payload["fee"] = json!(billing.amount_cents);
+    payload["payment_required"] = json!(true);
+    payload["status"] = json!("payment_requested");
+    payload["square"] = json!({
+        "billingRequestId": billing.id,
+        "paymentLinkUrl": billing.payment_link_url,
+        "paymentLinkId": billing.provider_payment_link_id,
+        "orderId": billing.provider_order_id,
+        "status": billing.status,
+        "amountCents": billing.amount_cents,
+        "currency": billing.currency,
+    });
+    payload
 }
 
 fn parse_json_object(raw: &str, field: &str) -> Result<Value, Status> {
@@ -2133,6 +2576,45 @@ mod tests {
         assert!(payload.get("square").is_none());
         assert!(payload.get("checkout").is_none());
         assert!(payload.get("payment_required").is_none());
+    }
+
+    #[test]
+    fn billing_validation_normalizes_currency_and_amount() {
+        assert_eq!(normalize_currency("").unwrap(), "USD");
+        assert_eq!(normalize_currency("usd").unwrap(), "USD");
+        assert!(normalize_currency("US").is_err());
+        assert_eq!(require_positive_amount(1).unwrap(), 1);
+        assert!(require_positive_amount(0).is_err());
+    }
+
+    #[test]
+    fn billing_planning_payload_records_square_reference() {
+        let billing = EventApplicationBilling {
+            id: "billing:1".to_string(),
+            event_application_id: "application:1".to_string(),
+            provider: "square".to_string(),
+            status: "payment_link_created".to_string(),
+            amount_cents: 5000,
+            currency: "USD".to_string(),
+            payment_link_url: "https://square.link/u/example".to_string(),
+            provider_payment_link_id: "plink_123".to_string(),
+            provider_order_id: "order_123".to_string(),
+            idempotency_key: "idem_123".to_string(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        };
+
+        let payload = billing_planning_payload(default_application_planning_payload(), &billing);
+
+        assert_eq!(payload["status"], "payment_requested");
+        assert_eq!(payload["paid"], false);
+        assert_eq!(payload["payment_required"], true);
+        assert_eq!(payload["fee"], 5000);
+        assert_eq!(payload["square"]["paymentLinkId"], "plink_123");
+        assert_eq!(
+            payload["square"]["paymentLinkUrl"],
+            "https://square.link/u/example"
+        );
     }
 
     #[test]

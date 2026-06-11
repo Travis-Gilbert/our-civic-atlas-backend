@@ -14,6 +14,7 @@ pub use crate::civic_atlas::v1::{
     event_planner_service_server::{EventPlannerService, EventPlannerServiceServer},
     BookmarkCreateRequest, BookmarkDeleteRequest, BookmarkListRequest, BookmarkListResponse,
     BookmarkMutationResponse, BookmarkUpdateRequest, CameraBookmark, EventApplication,
+    EventApplicationBilling, EventApplicationBillingRequest, EventApplicationBillingResponse,
     EventApplicationListRequest, EventApplicationListResponse, EventApplicationSubmitRequest,
     EventApplicationSubmitResponse, EventLayer, EventLayerListRequest, EventLayerListResponse,
     IntakePendingVendorRequest, IntakePendingVendorResponse, Placement, PlacementCreateRequest,

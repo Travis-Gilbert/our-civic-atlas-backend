@@ -10,10 +10,11 @@ use async_graphql::{Context, InputObject, MaybeUndefined, Object, SimpleObject};
 use chrono::{DateTime, Utc};
 use civic_atlas_types::civic_atlas::v1::TenantContext;
 use civic_atlas_types::event_planner::{
-    EventApplicationListRequest, EventApplicationSubmitRequest, EventApplicationSubmitResponse,
-    EventLayerListRequest, EventPlannerService, PlacementCreateRequest, PlacementDeleteRequest,
-    PlacementListRequest, PlacementMutationResponse, PlacementUpdateRequest, TaskCreateRequest,
-    TaskDeleteRequest, TaskListRequest, TaskMutationResponse, TaskUpdateRequest,
+    EventApplicationBillingRequest, EventApplicationBillingResponse, EventApplicationListRequest,
+    EventApplicationSubmitRequest, EventApplicationSubmitResponse, EventLayerListRequest,
+    EventPlannerService, PlacementCreateRequest, PlacementDeleteRequest, PlacementListRequest,
+    PlacementMutationResponse, PlacementUpdateRequest, TaskCreateRequest, TaskDeleteRequest,
+    TaskListRequest, TaskMutationResponse, TaskUpdateRequest,
 };
 use serde_json::{json, Value};
 use tonic::Request;
@@ -108,6 +109,30 @@ pub struct EventApplicationSubmitResult {
     pub backup_recorded: bool,
 }
 
+#[derive(SimpleObject, Default, Clone)]
+pub struct EventApplicationBilling {
+    pub id: String,
+    pub event_application_id: String,
+    pub provider: String,
+    pub status: String,
+    pub amount_cents: i64,
+    pub currency: String,
+    pub payment_link_url: Option<String>,
+    pub provider_payment_link_id: Option<String>,
+    pub provider_order_id: Option<String>,
+    pub idempotency_key: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(SimpleObject, Default, Clone)]
+pub struct EventApplicationBillingResult {
+    pub billing: Option<EventApplicationBilling>,
+    pub application: Option<EventApplication>,
+    pub created: bool,
+    pub square_requested: bool,
+}
+
 #[derive(InputObject)]
 pub struct EventApplicationSubmitInput {
     pub event_slug: String,
@@ -123,6 +148,16 @@ pub struct EventApplicationSubmitInput {
     pub category_payload: Option<async_graphql::Json<Value>>,
     pub source_key: Option<String>,
     pub submitted_at_ms: Option<i64>,
+}
+
+#[derive(InputObject)]
+pub struct EventApplicationBillingInput {
+    pub event_application_id: String,
+    pub amount_cents: i64,
+    pub currency: Option<String>,
+    pub description: Option<String>,
+    pub redirect_url: Option<String>,
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(InputObject)]
@@ -304,6 +339,30 @@ impl EventPlannerMutation {
             .into_inner();
 
         Ok(map_application_submit(response))
+    }
+
+    async fn request_event_application_billing(
+        &self,
+        ctx: &Context<'_>,
+        input: EventApplicationBillingInput,
+    ) -> async_graphql::Result<EventApplicationBillingResult> {
+        let actor_user_id = actor_user_id(ctx);
+        let response = service(ctx)?
+            .request_event_application_billing(Request::new(EventApplicationBillingRequest {
+                tenant_context: Some(default_tenant_context()),
+                event_application_id: input.event_application_id,
+                amount_cents: input.amount_cents,
+                currency: input.currency.unwrap_or_else(|| "USD".to_string()),
+                description: input.description.unwrap_or_default(),
+                redirect_url: input.redirect_url.unwrap_or_default(),
+                actor_user_id,
+                idempotency_key: input.idempotency_key.unwrap_or_default(),
+            }))
+            .await
+            .map_err(graphql_status)?
+            .into_inner();
+
+        Ok(map_application_billing(response))
     }
 
     async fn create_placement(
@@ -672,6 +731,30 @@ fn map_application_submit(
         created: response.created,
         duplicate: response.duplicate,
         backup_recorded: response.backup_recorded,
+    }
+}
+
+fn map_application_billing(
+    response: EventApplicationBillingResponse,
+) -> EventApplicationBillingResult {
+    EventApplicationBillingResult {
+        billing: response.billing.map(|billing| EventApplicationBilling {
+            id: billing.id,
+            event_application_id: billing.event_application_id,
+            provider: billing.provider,
+            status: billing.status,
+            amount_cents: billing.amount_cents,
+            currency: billing.currency,
+            payment_link_url: empty_to_none(billing.payment_link_url),
+            provider_payment_link_id: empty_to_none(billing.provider_payment_link_id),
+            provider_order_id: empty_to_none(billing.provider_order_id),
+            idempotency_key: billing.idempotency_key,
+            created_at: timestamp_to_iso(billing.created_at_ms),
+            updated_at: timestamp_to_iso(billing.updated_at_ms),
+        }),
+        application: response.application.map(map_application),
+        created: response.created,
+        square_requested: response.square_requested,
     }
 }
 
