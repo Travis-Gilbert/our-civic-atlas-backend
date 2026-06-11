@@ -7,9 +7,16 @@ pub mod reconstruction;
 pub mod tenant_db;
 pub mod validation;
 
-use std::{env, net::SocketAddr, sync::Arc};
+use std::{convert::Infallible, env, net::SocketAddr, sync::Arc};
 
-use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
+use async_stream::stream;
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::sse::{Event, KeepAlive, Sse},
+    routing::get,
+    Json, Router,
+};
 use civic_atlas_types::civic_atlas::v1::spacetime_atlas_service_server::SpacetimeAtlasService as SpacetimeAtlasGrpc;
 use civic_atlas_types::civic_atlas::v1::{
     civic_atlas_service_server::CivicAtlasService, CivicObject, CivicResearchRequest,
@@ -26,7 +33,11 @@ use rustyred_client::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{postgres::PgPoolOptions, types::Json as SqlJson, PgPool, Row};
+use sqlx::{
+    postgres::{PgListener, PgPoolOptions},
+    types::Json as SqlJson,
+    PgPool, Row,
+};
 use std::collections::HashSet;
 use tenant_resolver::require_tenant_context;
 use tonic::{Request, Response, Status};
@@ -1711,6 +1722,15 @@ struct GetViewportAtTimeJsonResponse {
     objects: Vec<Value>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EventPlannerSseQuery {
+    tenant_slug: Option<String>,
+    tenant: Option<String>,
+    event_slug: Option<String>,
+    event: Option<String>,
+}
+
 pub fn http_router(state: AtlasState) -> Router {
     // GraphQL surface ships on its own state (the composed schema), so
     // it lives as a sibling Router and is merged onto the JSON shim
@@ -1719,6 +1739,7 @@ pub fn http_router(state: AtlasState) -> Router {
 
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/sse/event-planner", get(event_planner_sse))
         .route(
             "/civic_atlas.v1.CivicAtlasService/ListPlaces",
             axum::routing::post(list_places_json),
@@ -1733,6 +1754,104 @@ pub fn http_router(state: AtlasState) -> Router {
 
 async fn healthz() -> Json<Value> {
     Json(json!({"status": "ok", "service": "civic-atlas-server"}))
+}
+
+async fn event_planner_sse(
+    State(state): State<AtlasState>,
+    Query(query): Query<EventPlannerSseQuery>,
+) -> Result<
+    Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>>,
+    (StatusCode, Json<Value>),
+> {
+    if state.db_pool().is_none() {
+        return Err(json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "DATABASE_URL is required for the planner SSE stream",
+        ));
+    }
+    let tenant_slug = query
+        .tenant_slug
+        .as_deref()
+        .or(query.tenant.as_deref())
+        .unwrap_or("flint");
+    let tenant = tenant_resolver::TenantId::parse(tenant_slug)
+        .map_err(|err| json_error(StatusCode::BAD_REQUEST, err.to_string()))?;
+    let event_slug = query
+        .event_slug
+        .as_deref()
+        .or(query.event.as_deref())
+        .unwrap_or("")
+        .trim();
+    if event_slug.is_empty() {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "eventSlug query parameter is required",
+        ));
+    }
+    let database_url = env::var("DATABASE_URL").map_err(|_| {
+        json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "DATABASE_URL is required for the planner SSE stream",
+        )
+    })?;
+    let tenant_slug = tenant.as_str().to_string();
+    let event_slug = event_slug.to_string();
+    let channel = format!("event_planner_{tenant_slug}");
+
+    let stream = stream! {
+        yield Ok(Event::default().comment(format!(
+            "connected tenant={tenant_slug} event={event_slug}",
+        )));
+        yield Ok(Event::default().event("hello").data(
+            json!({
+                "ready": true,
+                "tenantSlug": tenant_slug,
+                "eventSlug": event_slug,
+            })
+            .to_string(),
+        ));
+
+        let mut listener = match PgListener::connect(&database_url).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                warn!(%error, "planner SSE listener could not connect");
+                yield Ok(planner_error_event("listen_unavailable"));
+                return;
+            }
+        };
+        if let Err(error) = listener.listen(&channel).await {
+            warn!(%error, %channel, "planner SSE listener could not subscribe");
+            yield Ok(planner_error_event("listen_unavailable"));
+            return;
+        }
+
+        loop {
+            match listener.recv().await {
+                Ok(notification) => {
+                    yield Ok(Event::default()
+                        .event("planner_change")
+                        .data(notification.payload().to_string()));
+                }
+                Err(error) => {
+                    warn!(%error, %channel, "planner SSE listener stopped");
+                    yield Ok(planner_error_event("listen_stopped"));
+                    break;
+                }
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+fn planner_error_event(code: &str) -> Event {
+    Event::default()
+        .event("planner_error")
+        .data(json!({ "code": code }).to_string())
+}
+
+fn json_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (status, Json(json!({ "error": message.into() })))
 }
 
 async fn list_places_json(
@@ -1976,6 +2095,36 @@ mod tests {
                 max_lon: -83.6,
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn planner_sse_reports_missing_database_without_opening_stream() {
+        let state = AtlasState {
+            places: Arc::new(fixture::seed_places("flint")),
+            db: None,
+        };
+
+        let result = event_planner_sse(
+            State(state),
+            Query(EventPlannerSseQuery {
+                tenant_slug: Some("flint".to_string()),
+                tenant: None,
+                event_slug: Some("porchfest-2026".to_string()),
+                event: None,
+            }),
+        )
+        .await;
+
+        match result {
+            Ok(_) => panic!("planner SSE should require DATABASE_URL"),
+            Err((status, body)) => {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(
+                    body.0["error"],
+                    "DATABASE_URL is required for the planner SSE stream",
+                );
+            }
+        }
     }
 
     #[test]

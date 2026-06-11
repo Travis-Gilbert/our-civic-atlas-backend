@@ -19,6 +19,7 @@ license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1.0"
+async-stream = "0.3"
 async-graphql = { version = "7.0", default-features = false, features = ["chrono", "uuid"] }
 async-graphql-axum = "7.0"
 async-trait = "0.1"
@@ -26,6 +27,7 @@ axum = "0.7"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 clap = { version = "4.5", features = ["derive", "env"] }
+futures-core = "0.3"
 prost = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }

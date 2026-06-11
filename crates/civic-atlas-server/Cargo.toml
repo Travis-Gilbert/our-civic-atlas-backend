@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-stream.workspace = true
 async-graphql.workspace = true
 async-graphql-axum.workspace = true
 axum.workspace = true
@@ -14,6 +15,7 @@ base64.workspace = true
 chrono.workspace = true
 civic-atlas-reconstruction-engine = { path = "../civic-atlas-reconstruction-engine" }
 civic-atlas-types = { path = "../civic-atlas-types" }
+futures-core.workspace = true
 prost.workspace = true
 reqwest.workspace = true
 rustyred-client = { path = "../rustyred-client" }
