@@ -1,0 +1,32 @@
+[package]
+name = "civic-atlas-reconstruction-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MCP (stdio) server wrapping the Civic Atlas reconstruction pipeline + Scene Foundry renderer behind one reconstruct tool"
+
+[[bin]]
+name = "civic-atlas-reconstruction-mcp"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+civic-atlas-reconstruction-engine = { path = "../civic-atlas-reconstruction-engine" }
+civic-atlas-renderer = { path = "../civic-atlas-renderer" }
+civic-atlas-types = { path = "../civic-atlas-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# Official Rust MCP SDK. server + macros give the #[tool_router]/#[tool]
+# surface and the ToolRouter/ServerHandler types; transport-io is the
+# server-side stdio transport (rmcp::transport::stdio). schemars is the
+# input-schema deriver the tool macro uses; the server feature pulls it in,
+# but we depend on it directly so #[derive(JsonSchema)] resolves.
+rmcp = { version = "1.7", default-features = false, features = ["server", "macros", "transport-io"] }
+schemars = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
