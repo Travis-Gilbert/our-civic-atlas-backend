@@ -762,10 +762,164 @@ pub fn extract_direct(
         }
     }
 
+    // The footprint is authoritative (Sanborn, parcel): when the mass lacks
+    // plan dimensions, derive width/depth in meters from the best available
+    // footprint geometry so downstream rendering and photo-to-footprint
+    // camera estimation work against the real plan, not a default box.
+    if let Some(mass) = spec.mass.as_mut() {
+        if mass.width.is_none() || mass.depth.is_none() {
+            let footprint_geometry = evidence
+                .focus_building
+                .as_ref()
+                .map(|focus| focus.geometry_json.as_str())
+                .filter(|geometry| !geometry.trim().is_empty())
+                .or_else(|| {
+                    evidence.direct.iter().find_map(|artifact| match &artifact.decoded {
+                        DecodedArtifact::GisFeature { footprint_wkt, .. }
+                        | DecodedArtifact::SanbornSheet { footprint_wkt, .. } => {
+                            footprint_wkt.as_deref().filter(|wkt| !wkt.trim().is_empty())
+                        }
+                        _ => None,
+                    })
+                });
+            if let Some((width_m, depth_m)) =
+                footprint_geometry.and_then(footprint_plan_dims_m)
+            {
+                if mass.width.is_none() {
+                    mass.width = Some(DimensionRange {
+                        min: Some(width_m),
+                        max: Some(width_m),
+                        unit: "m".to_string(),
+                    });
+                    populated_fields.push("mass.width".to_string());
+                }
+                if mass.depth.is_none() {
+                    mass.depth = Some(DimensionRange {
+                        min: Some(depth_m),
+                        max: Some(depth_m),
+                        unit: "m".to_string(),
+                    });
+                    populated_fields.push("mass.depth".to_string());
+                }
+            }
+        }
+    }
+
     Ok(DirectExtraction {
         spec,
         populated_fields,
     })
+}
+
+/// Parse a footprint geometry (GeoJSON Polygon/MultiPolygon or WKT
+/// POLYGON/MULTIPOLYGON in lon/lat) and return the plan (width_m, depth_m)
+/// of its dominant-edge oriented bounding box. Width runs along the longest
+/// edge (the street-facing dimension by convention), depth perpendicular.
+pub fn footprint_plan_dims_m(geometry: &str) -> Option<(f64, f64)> {
+    let ring = parse_footprint_ring(geometry)?;
+    if ring.len() < 3 {
+        return None;
+    }
+
+    // Equirectangular meters at the footprint's latitude: adequate at
+    // building scale.
+    let mean_lat = ring.iter().map(|point| point[1]).sum::<f64>() / ring.len() as f64;
+    let meters_per_deg_lat = 111_320.0;
+    let meters_per_deg_lon = meters_per_deg_lat * mean_lat.to_radians().cos();
+    let origin = ring[0];
+    let points_m: Vec<[f64; 2]> = ring
+        .iter()
+        .map(|point| {
+            [
+                (point[0] - origin[0]) * meters_per_deg_lon,
+                (point[1] - origin[1]) * meters_per_deg_lat,
+            ]
+        })
+        .collect();
+
+    // Dominant edge: the longest segment of the ring sets the orientation.
+    let mut best_len_sq = 0.0_f64;
+    let mut best_angle = 0.0_f64;
+    for window in points_m.windows(2) {
+        let dx = window[1][0] - window[0][0];
+        let dy = window[1][1] - window[0][1];
+        let len_sq = dx * dx + dy * dy;
+        if len_sq > best_len_sq {
+            best_len_sq = len_sq;
+            best_angle = dy.atan2(dx);
+        }
+    }
+    if best_len_sq <= f64::EPSILON {
+        return None;
+    }
+
+    let (sin_a, cos_a) = (-best_angle).sin_cos();
+    let mut min_u = f64::MAX;
+    let mut max_u = f64::MIN;
+    let mut min_v = f64::MAX;
+    let mut max_v = f64::MIN;
+    for point in &points_m {
+        let u = point[0] * cos_a - point[1] * sin_a;
+        let v = point[0] * sin_a + point[1] * cos_a;
+        min_u = min_u.min(u);
+        max_u = max_u.max(u);
+        min_v = min_v.min(v);
+        max_v = max_v.max(v);
+    }
+    let width = max_u - min_u;
+    let depth = max_v - min_v;
+    if width <= 0.5 || depth <= 0.5 || width > 500.0 || depth > 500.0 {
+        return None;
+    }
+    Some((width, depth))
+}
+
+/// Extract the outer ring of the first polygon from GeoJSON or WKT.
+fn parse_footprint_ring(geometry: &str) -> Option<Vec<[f64; 2]>> {
+    let trimmed = geometry.trim();
+    if trimmed.starts_with('{') {
+        let value: Value = serde_json::from_str(trimmed).ok()?;
+        let geometry_value = if value.get("coordinates").is_some() {
+            &value
+        } else {
+            value.get("geometry")?
+        };
+        let kind = geometry_value.get("type")?.as_str()?;
+        let coordinates = geometry_value.get("coordinates")?;
+        let ring_value = match kind {
+            "Polygon" => coordinates.get(0)?,
+            "MultiPolygon" => coordinates.get(0)?.get(0)?,
+            _ => return None,
+        };
+        let ring: Vec<[f64; 2]> = ring_value
+            .as_array()?
+            .iter()
+            .filter_map(|position| {
+                let pair = position.as_array()?;
+                Some([pair.first()?.as_f64()?, pair.get(1)?.as_f64()?])
+            })
+            .collect();
+        return (ring.len() >= 3).then_some(ring);
+    }
+
+    let upper = trimmed.to_ascii_uppercase();
+    if upper.starts_with("POLYGON") || upper.starts_with("MULTIPOLYGON") {
+        // Outer ring = the first parenthesized coordinate list.
+        let inner_start = trimmed.find("((")?;
+        let rest = &trimmed[inner_start + 2..];
+        let inner_end = rest.find(')')?;
+        let ring: Vec<[f64; 2]> = rest[..inner_end]
+            .split(',')
+            .filter_map(|pair| {
+                let mut parts = pair.split_whitespace();
+                let lon: f64 = parts.next()?.parse().ok()?;
+                let lat: f64 = parts.next()?.parse().ok()?;
+                Some([lon, lat])
+            })
+            .collect();
+        return (ring.len() >= 3).then_some(ring);
+    }
+    None
 }
 
 pub async fn build_block_subgraph<R>(
@@ -3351,6 +3505,74 @@ mod tests {
             .nodes
             .iter()
             .any(|node| node.node_id == Uuid::nil().to_string()));
+    }
+
+    #[test]
+    fn footprint_dims_resolve_from_geojson_and_wkt() {
+        // Approximately 14 m x 18 m rectangle at Flint's latitude
+        // (lon delta 14 / (111320 * cos(43.01 deg)), lat delta 18 / 111320).
+        let geojson = r#"{"type":"Polygon","coordinates":[[
+            [-83.7082, 43.0118],
+            [-83.70802806, 43.0118],
+            [-83.70802806, 43.01196170],
+            [-83.7082, 43.01196170],
+            [-83.7082, 43.0118]
+        ]]}"#;
+        let (width, depth) = footprint_plan_dims_m(geojson).expect("geojson dims");
+        let (long_side, short_side) = if width >= depth { (width, depth) } else { (depth, width) };
+        assert!((long_side - 18.0).abs() < 0.5, "long side ~18m, got {long_side}");
+        assert!((short_side - 14.0).abs() < 0.5, "short side ~14m, got {short_side}");
+
+        let wkt = "POLYGON ((-83.7082 43.0118, -83.70802806 43.0118, \
+                   -83.70802806 43.01196170, -83.7082 43.01196170, -83.7082 43.0118))";
+        let (wkt_width, wkt_depth) = footprint_plan_dims_m(wkt).expect("wkt dims");
+        assert!((wkt_width - width).abs() < 0.01);
+        assert!((wkt_depth - depth).abs() < 0.01);
+
+        assert!(footprint_plan_dims_m("{}").is_none());
+        assert!(footprint_plan_dims_m("POINT (1 2)").is_none());
+    }
+
+    #[test]
+    fn extraction_fills_mass_dims_from_focus_footprint() {
+        let evidence = EvidenceBundle {
+            focus_building: Some(CivicObject {
+                id: Uuid::nil().to_string(),
+                tenant_id: "flint".to_string(),
+                name: "building:ct-1".to_string(),
+                object_type: "BuildingPresence".to_string(),
+                geometry_json: r#"{"type":"Polygon","coordinates":[[
+                    [-83.7082, 43.0118],
+                    [-83.70802806, 43.0118],
+                    [-83.70802806, 43.01196170],
+                    [-83.7082, 43.01196170],
+                    [-83.7082, 43.0118]
+                ]]}"#
+                .to_string(),
+                time_start_ms: Some(0),
+                time_end_ms: None,
+                confidence: 1.0,
+                source_ids: Vec::new(),
+                dossier_path: String::new(),
+                attributes: HashMap::new(),
+            }),
+            direct: vec![sanborn_artifact()],
+            adjacent: Vec::new(),
+            temporal_predecessor: None,
+            temporal_successor: None,
+        };
+        let direct = extract_direct(&request(), &evidence).expect("extraction succeeds");
+        let mass = direct.spec.mass.expect("mass present");
+        let width = mass.width.expect("width filled from footprint");
+        let depth = mass.depth.expect("depth filled from footprint");
+        assert_eq!(width.unit, "m");
+        let width_m = width.max.unwrap();
+        let depth_m = depth.max.unwrap();
+        let long_side = width_m.max(depth_m);
+        let short_side = width_m.min(depth_m);
+        assert!((long_side - 18.0).abs() < 0.5);
+        assert!((short_side - 14.0).abs() < 0.5);
+        assert!(direct.populated_fields.iter().any(|field| field == "mass.width"));
     }
 
     #[test]
