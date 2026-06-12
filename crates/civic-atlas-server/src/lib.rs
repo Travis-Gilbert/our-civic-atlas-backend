@@ -1737,6 +1737,12 @@ pub fn http_router(state: AtlasState) -> Router {
     // router below. Both end up under the same Axum HTTP listener.
     let graphql = crate::graphql::graphql_router(state.clone());
 
+    // Scene Foundry assets (massing GLBs + provenance records) written by
+    // the renderer are served from the configured asset dir so the minted
+    // /assets/scene-foundry/... URIs resolve on this same listener.
+    let scene_foundry_asset_dir = std::env::var("SCENE_FOUNDRY_ASSET_DIR")
+        .unwrap_or_else(|_| "data/scene-foundry-assets".to_string());
+
     Router::new()
         .route("/healthz", get(healthz))
         .route("/sse/event-planner", get(event_planner_sse))
@@ -1747,6 +1753,10 @@ pub fn http_router(state: AtlasState) -> Router {
         .route(
             "/spacetime-atlas/v1/GetViewportAtTime",
             axum::routing::post(get_viewport_at_time_json),
+        )
+        .nest_service(
+            "/assets/scene-foundry",
+            tower_http::services::ServeDir::new(scene_foundry_asset_dir),
         )
         .with_state(state)
         .merge(graphql)

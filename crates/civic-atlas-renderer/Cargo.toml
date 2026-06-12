@@ -1,27 +1,26 @@
 [package]
-name = "civic-atlas-outbox-worker"
+name = "civic-atlas-renderer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Drains reconstruction_projection_outbox -> RustyRed for the Civic Atlas backend"
-
-[[bin]]
-name = "civic-atlas-outbox-worker"
-path = "src/main.rs"
+description = "Scene Foundry reconstruction renderer: turns a MergedReconstructionSpec into real, provenance-honest assets"
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 civic-atlas-reconstruction-engine = { path = "../civic-atlas-reconstruction-engine" }
-civic-atlas-renderer = { path = "../civic-atlas-renderer" }
 civic-atlas-types = { path = "../civic-atlas-types" }
-clap.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
-theseus-client = { path = "../theseus-client" }
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+gltf = { version = "1.4", default-features = false, features = ["utils", "names", "extras", "import"] }
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

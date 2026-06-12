@@ -19,12 +19,17 @@
 
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use anyhow::{anyhow, Context, Result};
 use civic_atlas_reconstruction_engine::{
     attach_manifest_to_spec, reconstruction_part_records, reconstruction_spec_to_json,
     run_full_pipeline, PairformerCivicPriorModel, PipelineOutput, PostgisRepository,
-    ReconstructionRequest, SceneFoundryManifestGenerator, TheseusBatchEmbeddingProvider,
-    ZeroEmbeddingProvider,
+    ReconstructionRequest, TheseusBatchEmbeddingProvider, ZeroEmbeddingProvider,
+};
+use civic_atlas_renderer::{
+    select_tier, stamp_massing_texture_provenance, LocalDirAssetStore, PgRenderJobQueue,
+    SceneFoundryRenderer, TierThresholds,
 };
 use civic_atlas_types::civic_atlas::v1::{
     ReconstructionSpec, ReconstructionSpecStatus, TenantContext, TimeSlice,
@@ -73,14 +78,36 @@ struct Args {
     #[arg(long, env = "RECONSTRUCTION_JOB_BATCH_SIZE", default_value_t = 4)]
     reconstruction_job_batch_size: u32,
 
-    /// Prefix used by the Scene Foundry manifest generator while the
-    /// Blender/Modal renderer is queued or stubbed.
+    /// Filesystem root the Scene Foundry renderer writes massing assets to.
     #[arg(
         long,
-        env = "SCENE_FOUNDRY_URI_PREFIX",
-        default_value = "scene-foundry://queued"
+        env = "SCENE_FOUNDRY_ASSET_DIR",
+        default_value = "data/scene-foundry-assets"
     )]
-    scene_foundry_uri_prefix: String,
+    scene_foundry_asset_dir: String,
+
+    /// Public URL prefix minted into Scene Foundry asset URIs. Defaults to
+    /// the civic-atlas-server static asset route.
+    #[arg(
+        long,
+        env = "SCENE_FOUNDRY_PUBLIC_BASE_URL",
+        default_value = "/assets/scene-foundry"
+    )]
+    scene_foundry_public_base_url: String,
+
+    /// Ray Serve renderer endpoint in civic-atlas-ingest (POST /render).
+    /// When empty, GPU refinement jobs stay pending instead of burning
+    /// retry attempts against a renderer that is not deployed.
+    #[arg(long, env = "SCENE_FOUNDRY_RENDER_URL", default_value = "")]
+    scene_foundry_render_url: String,
+
+    /// Seconds allowed for one GPU render dispatch round trip.
+    #[arg(long, env = "SCENE_FOUNDRY_RENDER_TIMEOUT_SECS", default_value_t = 900)]
+    scene_foundry_render_timeout_secs: u64,
+
+    /// Maximum Scene Foundry render jobs claimed per poll.
+    #[arg(long, env = "SCENE_FOUNDRY_RENDER_JOB_BATCH_SIZE", default_value_t = 2)]
+    scene_foundry_render_job_batch_size: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -195,8 +222,9 @@ async fn run_one_poll(pool: &PgPool, args: &Args) -> () {
 
 async fn claim_and_process_all(pool: &PgPool, args: &Args) -> Result<usize> {
     let reconstruction_jobs = claim_and_process_reconstruction_jobs(pool, args).await?;
+    let render_jobs = claim_and_process_render_jobs(pool, args).await?;
     let projection_rows = claim_and_process(pool, args).await?;
-    Ok(reconstruction_jobs + projection_rows)
+    Ok(reconstruction_jobs + render_jobs + projection_rows)
 }
 
 async fn claim_and_process_reconstruction_jobs(pool: &PgPool, args: &Args) -> Result<usize> {
@@ -271,6 +299,342 @@ async fn claim_and_process_reconstruction_jobs(pool: &PgPool, args: &Args) -> Re
     Ok(handled)
 }
 
+#[derive(Debug)]
+struct RenderJobRow {
+    id: Uuid,
+    tenant_id: Uuid,
+    spec_id: String,
+    spec_version: i32,
+    render_tier: String,
+    job_kind: String,
+    spec_json: Value,
+    photo_sources: Value,
+    attempt_count: i32,
+}
+
+/// One refined asset returned by the Ray Serve renderer app in
+/// civic-atlas-ingest. The contract mirrors what
+/// `civic_atlas_ingest.scene_foundry.render` already returns: a URI plus a
+/// `sha256-<hex>` content hash, extended with the asset type and per-asset
+/// provenance metadata.
+#[derive(Debug, Clone, Deserialize)]
+struct RenderedAsset {
+    #[serde(rename = "assetId", default)]
+    asset_id: Option<String>,
+    #[serde(rename = "assetType")]
+    asset_type: String,
+    uri: String,
+    #[serde(rename = "contentHash")]
+    content_hash: String,
+    #[serde(default)]
+    metadata: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct RenderResponse {
+    status: String,
+    #[serde(default)]
+    assets: Vec<RenderedAsset>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// Claim and dispatch Scene Foundry GPU refinement jobs. When no renderer
+/// endpoint is configured, rows stay pending untouched: refinement waits
+/// for a deployed renderer instead of burning retry attempts.
+async fn claim_and_process_render_jobs(pool: &PgPool, args: &Args) -> Result<usize> {
+    if args.scene_foundry_render_url.trim().is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, tenant_id, spec_id, spec_version, render_tier, job_kind,
+               spec_jsonb, photo_sources_jsonb, attempt_count
+        FROM scene_foundry_render_jobs
+        WHERE status = 'pending'
+          AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+        ORDER BY created_at ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT $1
+        "#,
+    )
+    .bind(args.scene_foundry_render_job_batch_size as i64)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    if rows.is_empty() {
+        tx.rollback().await.ok();
+        return Ok(0);
+    }
+
+    let ids: Vec<Uuid> = rows.iter().map(|row| row.get::<Uuid, _>("id")).collect();
+    sqlx::query(
+        r#"
+        UPDATE scene_foundry_render_jobs
+        SET status = 'running', updated_at = now()
+        WHERE id = ANY($1)
+        "#,
+    )
+    .bind(&ids[..])
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let mut handled = 0_usize;
+    for row in rows {
+        let job = RenderJobRow {
+            id: row.get("id"),
+            tenant_id: row.get("tenant_id"),
+            spec_id: row.get("spec_id"),
+            spec_version: row.get("spec_version"),
+            render_tier: row.get("render_tier"),
+            job_kind: row.get("job_kind"),
+            spec_json: row
+                .try_get::<Json<Value>, _>("spec_jsonb")
+                .map(|json| json.0)
+                .unwrap_or(Value::Null),
+            photo_sources: row
+                .try_get::<Json<Value>, _>("photo_sources_jsonb")
+                .map(|json| json.0)
+                .unwrap_or_else(|_| json!([])),
+            attempt_count: row.get("attempt_count"),
+        };
+        debug!(
+            job_id = %job.id,
+            spec_id = %job.spec_id,
+            job_kind = %job.job_kind,
+            "claimed scene foundry render job"
+        );
+        let outcome = dispatch_render_job(pool, args, &job).await;
+        if let Err(error) =
+            mark_render_job_outcome(pool, job.id, job.attempt_count, outcome, args).await
+        {
+            error!(job_id = %job.id, %error, "failed to mark render job outcome");
+        }
+        handled += 1;
+    }
+    Ok(handled)
+}
+
+async fn dispatch_render_job(
+    pool: &PgPool,
+    args: &Args,
+    job: &RenderJobRow,
+) -> Result<Vec<RenderedAsset>, ProjectionError> {
+    let tenant_slug = resolve_tenant_slug(pool, job.tenant_id)
+        .await
+        .map_err(|error| ProjectionError::Transient(format!("tenant lookup: {error}")))?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(args.scene_foundry_render_timeout_secs))
+        .build()
+        .map_err(|error| ProjectionError::Transient(format!("http client: {error}")))?;
+
+    let payload = json!({
+        "tenant": tenant_slug,
+        "specId": job.spec_id,
+        "specVersion": job.spec_version,
+        "renderTier": job.render_tier,
+        "jobKind": job.job_kind,
+        "spec": job.spec_json,
+        "photoSources": job.photo_sources,
+    });
+
+    let response = client
+        .post(args.scene_foundry_render_url.trim_end_matches('/'))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| ProjectionError::Transient(format!("render dispatch: {error}")))?;
+
+    let status = response.status();
+    if status.is_client_error() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(ProjectionError::Permanent(format!(
+            "renderer rejected job ({status}): {body}"
+        )));
+    }
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(ProjectionError::Transient(format!(
+            "renderer error ({status}): {body}"
+        )));
+    }
+
+    let render: RenderResponse = response
+        .json()
+        .await
+        .map_err(|error| ProjectionError::Transient(format!("render response decode: {error}")))?;
+    if render.status != "succeeded" {
+        let message = render
+            .error
+            .unwrap_or_else(|| format!("renderer returned status {}", render.status));
+        return Err(ProjectionError::Transient(message));
+    }
+    if render.assets.is_empty() {
+        return Err(ProjectionError::Permanent(
+            "renderer reported success with zero assets".to_string(),
+        ));
+    }
+    for asset in &render.assets {
+        if asset.content_hash.trim().is_empty() || asset.uri.trim().is_empty() {
+            return Err(ProjectionError::Permanent(
+                "renderer asset missing uri or content hash".to_string(),
+            ));
+        }
+    }
+
+    // Upsert refined assets. generated_assets is keyed (tenant_id, asset_id)
+    // so refinement upgrades land idempotently next to the synchronous
+    // massing assets.
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| ProjectionError::Transient(format!("tx begin: {error}")))?;
+    set_tx_tenant(&mut tx, job.tenant_id)
+        .await
+        .map_err(|error| ProjectionError::Transient(format!("set tenant: {error}")))?;
+    for (index, asset) in render.assets.iter().enumerate() {
+        let asset_id = asset.asset_id.clone().unwrap_or_else(|| {
+            format!(
+                "scene-foundry:{}:v{}:{}:{}",
+                job.spec_id, job.spec_version, job.job_kind, index
+            )
+        });
+        sqlx::query(
+            r#"
+            INSERT INTO generated_assets (
+              tenant_id, asset_id, spec_id, spec_version, asset_type, uri,
+              content_hash, metadata_jsonb
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8)
+            ON CONFLICT (tenant_id, asset_id) DO UPDATE
+            SET asset_type = EXCLUDED.asset_type,
+                uri = EXCLUDED.uri,
+                content_hash = EXCLUDED.content_hash,
+                metadata_jsonb = EXCLUDED.metadata_jsonb
+            "#,
+        )
+        .bind(job.tenant_id)
+        .bind(&asset_id)
+        .bind(&job.spec_id)
+        .bind(job.spec_version)
+        .bind(&asset.asset_type)
+        .bind(&asset.uri)
+        .bind(&asset.content_hash)
+        .bind(Json(asset.metadata.clone()))
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| ProjectionError::Transient(format!("asset upsert: {error}")))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|error| ProjectionError::Transient(format!("tx commit: {error}")))?;
+
+    Ok(render.assets)
+}
+
+async fn mark_render_job_outcome(
+    pool: &PgPool,
+    id: Uuid,
+    attempt_count: i32,
+    outcome: Result<Vec<RenderedAsset>, ProjectionError>,
+    args: &Args,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    match outcome {
+        Ok(assets) => {
+            let result_assets = json!(assets
+                .iter()
+                .map(|asset| {
+                    json!({
+                        "assetType": asset.asset_type,
+                        "uri": asset.uri,
+                        "contentHash": asset.content_hash,
+                        "metadata": asset.metadata,
+                    })
+                })
+                .collect::<Vec<_>>());
+            sqlx::query(
+                r#"
+                UPDATE scene_foundry_render_jobs
+                SET status = 'succeeded',
+                    attempt_count = attempt_count + 1,
+                    result_assets_jsonb = $2,
+                    last_error = NULL,
+                    updated_at = now(),
+                    next_attempt_at = NULL
+                WHERE id = $1
+                "#,
+            )
+            .bind(id)
+            .bind(Json(result_assets))
+            .execute(&mut *tx)
+            .await?;
+        }
+        Err(ProjectionError::Permanent(msg)) => {
+            sqlx::query(
+                r#"
+                UPDATE scene_foundry_render_jobs
+                SET status = 'failed',
+                    attempt_count = attempt_count + 1,
+                    last_error = $2,
+                    updated_at = now(),
+                    next_attempt_at = NULL
+                WHERE id = $1
+                "#,
+            )
+            .bind(id)
+            .bind(&msg)
+            .execute(&mut *tx)
+            .await?;
+        }
+        Err(ProjectionError::Transient(msg)) => {
+            let next_attempt_count = attempt_count + 1;
+            if next_attempt_count >= args.max_attempts {
+                sqlx::query(
+                    r#"
+                    UPDATE scene_foundry_render_jobs
+                    SET status = 'failed',
+                        attempt_count = $2,
+                        last_error = $3,
+                        updated_at = now(),
+                        next_attempt_at = NULL
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(id)
+                .bind(next_attempt_count)
+                .bind(&msg)
+                .execute(&mut *tx)
+                .await?;
+            } else {
+                let backoff = backoff_for_attempt(args.backoff_base_secs, next_attempt_count);
+                sqlx::query(
+                    r#"
+                    UPDATE scene_foundry_render_jobs
+                    SET status = 'pending',
+                        attempt_count = $2,
+                        last_error = $3,
+                        updated_at = now(),
+                        next_attempt_at = now() + make_interval(secs => $4)
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(id)
+                .bind(next_attempt_count)
+                .bind(&msg)
+                .bind(backoff as f64)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 async fn process_reconstruction_job(
     pool: &PgPool,
     args: &Args,
@@ -311,7 +675,12 @@ where
     };
     let repository = PostgisRepository::new(pool.clone());
     let model = PairformerCivicPriorModel::default();
-    let generator = SceneFoundryManifestGenerator::new(args.scene_foundry_uri_prefix.clone());
+    let store = Arc::new(LocalDirAssetStore::new(
+        args.scene_foundry_asset_dir.clone(),
+        args.scene_foundry_public_base_url.clone(),
+    ));
+    let generator = SceneFoundryRenderer::new(store)
+        .with_job_queue(Arc::new(PgRenderJobQueue::new(pool.clone())));
     let output = run_full_pipeline(request, &repository, embedding_provider, &model, &generator)
         .await
         .map_err(|error| ProjectionError::Transient(format!("pipeline: {error}")))?;
@@ -328,6 +697,11 @@ async fn persist_reconstruction_output(
 ) -> Result<ProcessedReconstruction> {
     let mut spec = output.merged.spec.clone();
     attach_manifest_to_spec(&mut spec, &output.asset_manifest);
+    // Persist the same texture provenance the renderer recorded for what it
+    // actually produced: procedural PBR massing until a GPU appearance pass
+    // upgrades it to archival_photo.
+    let tier_decision = select_tier(&spec, &TierThresholds::default());
+    stamp_massing_texture_provenance(&mut spec, tier_decision.tier);
     spec.tenant_context = Some(TenantContext {
         tenant_id: tenant_slug.to_string(),
         atlas_node_id: format!("atlas:{tenant_slug}"),

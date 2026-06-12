@@ -24,8 +24,11 @@ use civic_atlas_reconstruction_engine::{
     run_full_pipeline, Artifact as EngineArtifact, BlockCoherentPriorModel,
     EvidenceBundle as EngineEvidenceBundle, GeneratedAsset as EngineGeneratedAsset,
     MergeConflict as EngineMergeConflict, PostgisRepository,
-    ReconstructionRequest as EngineReconstructionRequest, SceneFoundryManifestGenerator,
-    ZeroEmbeddingProvider,
+    ReconstructionRequest as EngineReconstructionRequest, ZeroEmbeddingProvider,
+};
+use civic_atlas_renderer::{
+    select_tier, stamp_massing_texture_provenance, LocalDirAssetStore, PgRenderJobQueue,
+    SceneFoundryRenderer, TierThresholds,
 };
 use civic_atlas_types::civic_atlas::v1::{
     reconstruction_service_server::ReconstructionService, GetReconstructionSpecRequest,
@@ -386,19 +389,28 @@ pub fn reconstruction_from_spec(spec: &ReconstructionSpec) -> HistoricalReconstr
         .and_then(|m| dimension_meters(m.height.as_ref()))
         .unwrap_or((stories_default * 3.0).max(3.0));
 
-    // Sidecar walks spec.assets looking for "scene" asset_type to find
-    // a renderable glb/gltf. Port that pattern.
-    let scene_asset = spec
+    // Walk spec.assets for "scene" asset types. The geometry URL is the
+    // first renderable glb/gltf; the foundry asset URL is the provenance
+    // record (a scene asset ending .json), falling back to the first scene
+    // asset so older specs with a single manifest pointer keep working.
+    let scene_assets: Vec<&ReconstructionAsset> = spec
         .assets
         .iter()
-        .find(|a| a.asset_type.to_ascii_lowercase().contains("scene"));
-    let scene_uri = scene_asset
+        .filter(|a| a.asset_type.to_ascii_lowercase().contains("scene"))
+        .filter(|a| !a.uri.is_empty())
+        .collect();
+    let renderable_geometry_url = scene_assets
+        .iter()
         .map(|a| a.uri.clone())
-        .filter(|uri| !uri.is_empty());
-    let renderable_geometry_url = scene_uri.clone().filter(|uri| {
-        let lower = uri.to_ascii_lowercase();
-        lower.ends_with(".glb") || lower.ends_with(".gltf")
-    });
+        .find(|uri| {
+            let lower = uri.to_ascii_lowercase();
+            lower.ends_with(".glb") || lower.ends_with(".gltf")
+        });
+    let provenance_record_url = scene_assets
+        .iter()
+        .map(|a| a.uri.clone())
+        .find(|uri| uri.to_ascii_lowercase().ends_with(".json"));
+    let scene_uri = provenance_record_url.or_else(|| scene_assets.first().map(|a| a.uri.clone()));
 
     // Description: form · material · roof_type, separated by middle
     // dots. Mirrors sidecar reconstructionFromSpec line 734-740.
@@ -1022,10 +1034,12 @@ pub async fn resolve_reconstruction_for(
         auto_approve: false,
     };
 
-    let repository = PostgisRepository::new(pool);
+    let repository = PostgisRepository::new(pool.clone());
     let embeddings = ZeroEmbeddingProvider::default();
     let prior_model = BlockCoherentPriorModel::default();
-    let asset_generator = SceneFoundryManifestGenerator::default();
+    let store = std::sync::Arc::new(LocalDirAssetStore::from_env());
+    let asset_generator = SceneFoundryRenderer::new(store)
+        .with_job_queue(std::sync::Arc::new(PgRenderJobQueue::new(pool)));
     let output = run_full_pipeline(
         request,
         &repository,
@@ -1037,6 +1051,10 @@ pub async fn resolve_reconstruction_for(
     .map_err(|err| async_graphql::Error::new(format!("run_full_pipeline failed: {err}")))?;
 
     let mut spec = output.merged.spec.clone();
+    // Record what the renderer actually produced: procedural PBR texture
+    // provenance until a GPU appearance pass upgrades it.
+    let tier_decision = select_tier(&spec, &TierThresholds::default());
+    stamp_massing_texture_provenance(&mut spec, tier_decision.tier);
     if spec.assets.is_empty() {
         spec.assets = engine_assets_to_proto(
             &tenant_id,

@@ -3,6 +3,7 @@ members = [
     "crates/civic-atlas-cli",
     "crates/civic-atlas-outbox-worker",
     "crates/civic-atlas-reconstruction-engine",
+    "crates/civic-atlas-renderer",
     "crates/civic-atlas-server",
     "crates/civic-atlas-types",
     "crates/rustyred-client",
@@ -40,7 +41,7 @@ tonic = "0.12"
 tonic-build = "0.12"
 tonic-web = "0.12"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.11", features = ["v4", "serde"] }

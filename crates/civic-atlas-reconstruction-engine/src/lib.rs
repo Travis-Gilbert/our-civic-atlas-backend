@@ -1209,62 +1209,6 @@ impl EmbeddingProvider for TheseusBatchEmbeddingProvider {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SceneFoundryManifestGenerator {
-    uri_prefix: String,
-}
-
-impl SceneFoundryManifestGenerator {
-    pub fn new(uri_prefix: impl Into<String>) -> Self {
-        Self {
-            uri_prefix: uri_prefix.into(),
-        }
-    }
-}
-
-impl Default for SceneFoundryManifestGenerator {
-    fn default() -> Self {
-        Self::new("scene-foundry://queued")
-    }
-}
-
-#[async_trait]
-impl AssetGenerator for SceneFoundryManifestGenerator {
-    async fn generate(&self, merged: &MergedReconstructionSpec) -> Result<AssetManifest> {
-        let spec = &merged.spec;
-        let manifest_id = format!("scene-foundry:{}:v{}", spec.spec_id, spec.spec_version);
-        let uri = format!(
-            "{}/{}/v{}/manifest.json",
-            self.uri_prefix.trim_end_matches('/'),
-            spec.spec_id,
-            spec.spec_version
-        );
-        let mut metadata = BTreeMap::new();
-        metadata.insert("generator".to_string(), "scene_foundry".to_string());
-        metadata.insert(
-            "mergeConflictCount".to_string(),
-            merged.conflicts.len().to_string(),
-        );
-        let asset = GeneratedAsset {
-            asset_id: manifest_id.clone(),
-            asset_type: "scene_foundry_manifest".to_string(),
-            uri,
-            content_hash: String::new(),
-            metadata: metadata.clone(),
-        };
-        Ok(AssetManifest {
-            manifest_id,
-            spec_id: spec.spec_id.clone(),
-            spec_version: spec.spec_version,
-            fidelity_tier: fidelity_tier(spec).to_string(),
-            generator: "scene_foundry".to_string(),
-            status: "queued".to_string(),
-            assets: vec![asset],
-            metadata,
-        })
-    }
-}
-
 #[derive(Clone)]
 pub struct PostgisRepository {
     pool: PgPool,
@@ -1810,7 +1754,7 @@ fn mode_u32(values: impl IntoIterator<Item = u32>) -> Option<u32> {
         .map(|(value, _)| value)
 }
 
-fn fidelity_tier(spec: &ReconstructionSpec) -> &'static str {
+pub fn fidelity_tier(spec: &ReconstructionSpec) -> &'static str {
     let source_count = spec
         .mass
         .as_ref()
@@ -2412,7 +2356,7 @@ fn value_to_u32(value: &Value) -> Option<u32> {
         .and_then(|number| u32::try_from(number as i64).ok())
 }
 
-fn reconstruction_node_id(spec: &ReconstructionSpec, field_path: &str) -> String {
+pub fn reconstruction_node_id(spec: &ReconstructionSpec, field_path: &str) -> String {
     format!(
         "reconstruction-node:{}:{}",
         stable_id_fragment(&spec.spec_id),
@@ -3325,6 +3269,38 @@ mod tests {
         }
     }
 
+    /// Test double for the asset-generation port. The real implementation
+    /// lives in the civic-atlas-renderer crate (which depends on this one),
+    /// so engine tests use a static generator that exercises the manifest
+    /// pass-through contract: real content hash, completed status.
+    struct StaticManifestGenerator;
+
+    #[async_trait]
+    impl AssetGenerator for StaticManifestGenerator {
+        async fn generate(&self, merged: &MergedReconstructionSpec) -> Result<AssetManifest> {
+            let manifest_id = format!(
+                "test:{}:v{}",
+                merged.spec.spec_id, merged.spec.spec_version
+            );
+            Ok(AssetManifest {
+                manifest_id: manifest_id.clone(),
+                spec_id: merged.spec.spec_id.clone(),
+                spec_version: merged.spec.spec_version,
+                fidelity_tier: fidelity_tier(&merged.spec).to_string(),
+                generator: "static_test_generator".to_string(),
+                status: "completed".to_string(),
+                assets: vec![GeneratedAsset {
+                    asset_id: format!("{manifest_id}:geometry"),
+                    asset_type: "scene_foundry_geometry".to_string(),
+                    uri: "https://example.test/assets/massing.glb".to_string(),
+                    content_hash: "sha256-static-test".to_string(),
+                    metadata: BTreeMap::new(),
+                }],
+                metadata: BTreeMap::new(),
+            })
+        }
+    }
+
     #[tokio::test]
     async fn full_pipeline_prefers_direct_fields_and_generates_manifest() {
         let repo = InMemoryRepository {
@@ -3352,7 +3328,7 @@ mod tests {
             &repo,
             &ZeroEmbeddingProvider::default(),
             &BlockCoherentPriorModel::default(),
-            &SceneFoundryManifestGenerator::default(),
+            &StaticManifestGenerator,
         )
         .await
         .expect("pipeline runs");
@@ -3361,7 +3337,15 @@ mod tests {
         assert_eq!(spec.mass.unwrap().stories, 2);
         assert_eq!(spec.facades[0].primary_material, "brick");
         assert_eq!(spec.roof.unwrap().roof_type, "flat");
-        assert_eq!(output.asset_manifest.status, "queued");
+        // The pipeline passes the generator's manifest through verbatim: a
+        // real generator means a completed status and a real content hash,
+        // never the old stub's queued placeholder.
+        assert_eq!(output.asset_manifest.status, "completed");
+        assert!(output
+            .asset_manifest
+            .assets
+            .iter()
+            .all(|asset| !asset.content_hash.is_empty()));
         assert!(output
             .embedded_subgraph
             .nodes
