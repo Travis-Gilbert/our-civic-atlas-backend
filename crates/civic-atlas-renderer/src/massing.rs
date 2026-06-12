@@ -56,6 +56,9 @@ pub enum PartKind {
     Opening,
     Roof,
     Foundation,
+    /// Projecting trim (cornice, parapet band). Kept distinct from Roof so
+    /// roof-form geometry stays addressable on its own.
+    Trim,
 }
 
 /// Building side in plan. Front faces +Z.
@@ -317,6 +320,245 @@ fn push_wall_band(
     );
 }
 
+/// Emit a wall rectangle in (u, y) face coordinates at the wall plane.
+/// No-op for degenerate spans so the punched-wall tessellation can pass
+/// zero-width strips without producing junk triangles.
+fn push_wall_rect(
+    part: &mut MassingPart,
+    side: Side,
+    geometry: &SideGeometry,
+    u0: f32,
+    u1: f32,
+    v0: f32,
+    v1: f32,
+) {
+    if u1 - u0 <= 1e-3 || v1 - v0 <= 1e-3 {
+        return;
+    }
+    part.push_quad(
+        [
+            wall_point(side, geometry, u0, v0, 0.0),
+            wall_point(side, geometry, u1, v0, 0.0),
+            wall_point(side, geometry, u1, v1, 0.0),
+            wall_point(side, geometry, u0, v1, 0.0),
+        ],
+        geometry.normal,
+    );
+}
+
+/// Emit a recessed opening: a glass pane set back into the wall by `reveal`,
+/// plus four jamb faces (sill, head, two reveals) bridging the wall plane to
+/// the glass plane. Without CSG, the punched-wall tessellation leaves the
+/// hole and this fills it with depth, so windows read as openings (not flat
+/// patches) at city zoom. Jambs are wall-colored thickness and go in the
+/// wall part; the pane goes in the glazing part. Materials are double-sided,
+/// so approximate jamb normals are acceptable.
+fn push_recessed_opening(
+    wall: &mut MassingPart,
+    glazing: &mut MassingPart,
+    side: Side,
+    geometry: &SideGeometry,
+    u0: f32,
+    u1: f32,
+    v0: f32,
+    v1: f32,
+    reveal: f32,
+) {
+    if u1 - u0 <= 1e-3 || v1 - v0 <= 1e-3 {
+        return;
+    }
+    glazing.push_quad(
+        [
+            wall_point(side, geometry, u0, v0, -reveal),
+            wall_point(side, geometry, u1, v0, -reveal),
+            wall_point(side, geometry, u1, v1, -reveal),
+            wall_point(side, geometry, u0, v1, -reveal),
+        ],
+        geometry.normal,
+    );
+    // Sill (bottom jamb).
+    wall.push_quad(
+        [
+            wall_point(side, geometry, u0, v0, 0.0),
+            wall_point(side, geometry, u1, v0, 0.0),
+            wall_point(side, geometry, u1, v0, -reveal),
+            wall_point(side, geometry, u0, v0, -reveal),
+        ],
+        geometry.normal,
+    );
+    // Head (top jamb).
+    wall.push_quad(
+        [
+            wall_point(side, geometry, u0, v1, 0.0),
+            wall_point(side, geometry, u0, v1, -reveal),
+            wall_point(side, geometry, u1, v1, -reveal),
+            wall_point(side, geometry, u1, v1, 0.0),
+        ],
+        geometry.normal,
+    );
+    // Left jamb.
+    wall.push_quad(
+        [
+            wall_point(side, geometry, u0, v0, 0.0),
+            wall_point(side, geometry, u0, v0, -reveal),
+            wall_point(side, geometry, u0, v1, -reveal),
+            wall_point(side, geometry, u0, v1, 0.0),
+        ],
+        geometry.normal,
+    );
+    // Right jamb.
+    wall.push_quad(
+        [
+            wall_point(side, geometry, u1, v0, 0.0),
+            wall_point(side, geometry, u1, v1, 0.0),
+            wall_point(side, geometry, u1, v1, -reveal),
+            wall_point(side, geometry, u1, v0, -reveal),
+        ],
+        geometry.normal,
+    );
+}
+
+/// Tessellate one wall band [`y0`, `y1`] into a grid of `bays` x `rows`
+/// punched windows: solid wall around each opening, recessed pane in the
+/// hole. This is the grammar rung: it turns the spec's bay/floor counts into
+/// recognizable facade structure instead of a blank slab.
+#[allow(clippy::too_many_arguments)]
+fn build_punched_band(
+    wall: &mut MassingPart,
+    glazing: &mut MassingPart,
+    side: Side,
+    geometry: &SideGeometry,
+    y0: f32,
+    y1: f32,
+    bays: u32,
+    rows: u32,
+) {
+    let bays = bays.max(1);
+    let rows = rows.max(1);
+    let total_w = geometry.width;
+    let x0 = -total_w / 2.0;
+    let cell_w = total_w / bays as f32;
+    let cell_h = (y1 - y0) / rows as f32;
+    if cell_w <= 0.4 || cell_h <= 0.4 {
+        push_wall_band(wall, side, geometry, y0, y1);
+        return;
+    }
+    // Window inside each cell: a centered pane leaving a pier and sill/head.
+    let win_w = (cell_w * 0.55).clamp(0.6, cell_w - 0.5);
+    let win_h = (cell_h * 0.6).clamp(0.8, cell_h - 0.7);
+    let reveal = 0.22_f32.min(geometry.offset * 0.4);
+    for row in 0..rows {
+        let cy0 = y0 + cell_h * row as f32;
+        let cy1 = cy0 + cell_h;
+        let wy0 = (cy0 + cy1) / 2.0 - win_h / 2.0;
+        let wy1 = (cy0 + cy1) / 2.0 + win_h / 2.0;
+        for bay in 0..bays {
+            let cx0 = x0 + cell_w * bay as f32;
+            let cx1 = cx0 + cell_w;
+            let wx0 = (cx0 + cx1) / 2.0 - win_w / 2.0;
+            let wx1 = (cx0 + cx1) / 2.0 + win_w / 2.0;
+            // Wall panels around the punched window.
+            push_wall_rect(wall, side, geometry, cx0, cx1, cy0, wy0); // below
+            push_wall_rect(wall, side, geometry, cx0, cx1, wy1, cy1); // above
+            push_wall_rect(wall, side, geometry, cx0, wx0, wy0, wy1); // left pier
+            push_wall_rect(wall, side, geometry, wx1, cx1, wy0, wy1); // right pier
+            push_recessed_opening(wall, glazing, side, geometry, wx0, wx1, wy0, wy1, reveal);
+        }
+    }
+}
+
+/// Emit an axis-aligned box (6 quads) centered at `center` with `size`. Used
+/// for the cornice band and other solid trims.
+fn push_box(part: &mut MassingPart, center: [f32; 3], size: [f32; 3]) {
+    let [cx, cy, cz] = center;
+    let (hx, hy, hz) = (size[0] / 2.0, size[1] / 2.0, size[2] / 2.0);
+    part.push_quad(
+        [[cx - hx, cy - hy, cz + hz], [cx + hx, cy - hy, cz + hz], [cx + hx, cy + hy, cz + hz], [cx - hx, cy + hy, cz + hz]],
+        [0.0, 0.0, 1.0],
+    );
+    part.push_quad(
+        [[cx + hx, cy - hy, cz - hz], [cx - hx, cy - hy, cz - hz], [cx - hx, cy + hy, cz - hz], [cx + hx, cy + hy, cz - hz]],
+        [0.0, 0.0, -1.0],
+    );
+    part.push_quad(
+        [[cx + hx, cy - hy, cz + hz], [cx + hx, cy - hy, cz - hz], [cx + hx, cy + hy, cz - hz], [cx + hx, cy + hy, cz + hz]],
+        [1.0, 0.0, 0.0],
+    );
+    part.push_quad(
+        [[cx - hx, cy - hy, cz - hz], [cx - hx, cy - hy, cz + hz], [cx - hx, cy + hy, cz + hz], [cx - hx, cy + hy, cz - hz]],
+        [-1.0, 0.0, 0.0],
+    );
+    part.push_quad(
+        [[cx - hx, cy + hy, cz + hz], [cx + hx, cy + hy, cz + hz], [cx + hx, cy + hy, cz - hz], [cx - hx, cy + hy, cz - hz]],
+        [0.0, 1.0, 0.0],
+    );
+    part.push_quad(
+        [[cx - hx, cy - hy, cz - hz], [cx + hx, cy - hy, cz - hz], [cx + hx, cy - hy, cz + hz], [cx - hx, cy - hy, cz + hz]],
+        [0.0, -1.0, 0.0],
+    );
+}
+
+/// True for masonry materials that carry a projecting cornice in this
+/// period; wood-frame buildings get an eave from the roof instead.
+fn is_masonry(material: &str) -> bool {
+    let key = material.to_ascii_lowercase();
+    key.contains("brick")
+        || key.contains("stone")
+        || key.contains("concrete")
+        || key.contains("fire")
+        || key.contains("masonry")
+}
+
+/// Effective window grid for one facade side. Uses the documented opening
+/// grid when the spec carries one; otherwise synthesizes a grammar default
+/// from the plan span and story count. A synthesized grid is inference: its
+/// windows render ghosted even when the wall material is documented, because
+/// the window arrangement is a guess, not a record.
+struct FacadeGrid {
+    bays: u32,
+    rows: u32,
+    has_storefront: bool,
+    flag: PartFlag,
+    field_path: String,
+}
+
+fn effective_grid(
+    side: Side,
+    facade: Option<(usize, &Facade)>,
+    span_m: f32,
+    upper_rows: u32,
+    has_ground_floor: bool,
+) -> FacadeGrid {
+    if let Some((index, facade_ref)) = facade {
+        if let Some(grid) = facade_ref.opening_grids.first() {
+            return FacadeGrid {
+                bays: grid.bay_count.max(1),
+                rows: grid.floor_count.max(1).min(upper_rows.max(1)),
+                has_storefront: grid.has_storefront_ground,
+                flag: classify_part(grid.provenance.as_ref()),
+                field_path: format!("facades[{index}].openingGrids[0]"),
+            };
+        }
+    }
+    // Grammar default: ~3.4 m bay rhythm, one window row per upper story.
+    let min_bays = if matches!(side, Side::Front) { 2 } else { 1 };
+    let bays = ((span_m / 3.4).round() as i32).clamp(min_bays, 7) as u32;
+    let field_path = match facade {
+        Some((index, _)) => format!("facades[{index}].openingGrids[grammar]"),
+        None => format!("facades[{}].openingGrids[grammar]", side.as_str()),
+    };
+    let mut flag = PartFlag::undocumented();
+    // A grammar prior is a low-confidence inference, not zero signal.
+    flag.confidence = 0.3;
+    FacadeGrid {
+        bays,
+        rows: upper_rows.max(1),
+        has_storefront: has_ground_floor && matches!(side, Side::Front),
+        flag,
+        field_path,
+    }
+}
+
 /// Normalize a spec facade_side string onto a plan side.
 fn match_side(facade_side: &str) -> Option<Side> {
     let normalized = facade_side.to_ascii_lowercase();
@@ -439,6 +681,7 @@ pub fn build_massing(spec: &ReconstructionSpec) -> Result<MassingModel> {
         .find(|material| !material.is_empty())
         .unwrap_or("");
 
+    let stories = dims.stories.max(1);
     for (side, facade) in &assignments {
         let geometry = side_geometry(*side, &dims);
         let (facade_index, facade_ref) = match facade {
@@ -469,7 +712,43 @@ pub fn build_massing(spec: &ReconstructionSpec) -> Result<MassingModel> {
             material_name,
             color,
         );
-        push_wall_band(&mut wall, *side, &geometry, ground_band, eave);
+
+        // Window grid: documented or grammar-synthesized. Upper rows are the
+        // stories above the ground band (the ground floor gets a storefront
+        // or door instead of a window row).
+        let upper_rows = if ground_band > 0.0 {
+            stories.saturating_sub(1).max(1)
+        } else {
+            stories
+        };
+        let grid = effective_grid(*side, *facade, geometry.width, upper_rows, ground_band > 0.0);
+        let (glazing_material, glazing_color) = if grid.flag.documented {
+            ("glazing", GLASS_COLOR)
+        } else {
+            ("ghost-glazing", crate::provenance::ghost_palette::HIGHLIGHT)
+        };
+        let mut glazing = MassingPart::new(
+            grid.field_path.clone(),
+            format!("{} opening grid", side.as_str()),
+            PartKind::Opening,
+            grid.flag.clone(),
+            glazing_material,
+            glazing_color,
+        );
+
+        // Punched, recessed window grid over the upper wall band. This is the
+        // grammar rung: a building, not a slab, from the spec's bay/floor
+        // counts alone.
+        build_punched_band(
+            &mut wall,
+            &mut glazing,
+            *side,
+            &geometry,
+            ground_band,
+            eave,
+            grid.bays,
+            grid.rows,
+        );
 
         // Gable ends: vertical triangles closing the wall up to the ridge on
         // the two sides perpendicular to the ridge.
@@ -492,7 +771,6 @@ pub fn build_massing(spec: &ReconstructionSpec) -> Result<MassingModel> {
                 );
             }
         }
-        parts.push(wall);
 
         // Ground-floor band as its own part when the spec carries one.
         if ground_band > 0.0 {
@@ -509,97 +787,125 @@ pub fn build_massing(spec: &ReconstructionSpec) -> Result<MassingModel> {
                 ground_material_name,
                 ground_color,
             );
-            push_wall_band(&mut ground, *side, &geometry, 0.0, ground_band);
+
+            if grid.has_storefront && *side == Side::Front {
+                // Storefront: piers + lintel framing a wide recessed window.
+                let band_w = (geometry.width * 0.82).min(geometry.width - 1.2);
+                let sill = (ground_band * 0.12).max(0.3);
+                let head = (ground_band * 0.9).min(ground_band - 0.2);
+                let pier = (geometry.width - band_w) / 2.0;
+                let half = geometry.width / 2.0;
+                push_wall_rect(&mut ground, *side, &geometry, -half, -half + pier, 0.0, ground_band);
+                push_wall_rect(&mut ground, *side, &geometry, half - pier, half, 0.0, ground_band);
+                push_wall_rect(&mut ground, *side, &geometry, -half + pier, half - pier, 0.0, sill);
+                push_wall_rect(&mut ground, *side, &geometry, -half + pier, half - pier, head, ground_band);
+                push_recessed_opening(
+                    &mut ground,
+                    &mut glazing,
+                    *side,
+                    &geometry,
+                    -half + pier,
+                    half - pier,
+                    sill,
+                    head,
+                    0.3,
+                );
+            } else if *side == Side::Front {
+                // Solid ground floor with a centered recessed entry door.
+                let door_h = (ground_band * 0.85).min(2.4);
+                let door_w = 1.2_f32.min(geometry.width * 0.18);
+                let half = geometry.width / 2.0;
+                push_wall_rect(&mut ground, *side, &geometry, -half, -door_w / 2.0, 0.0, ground_band);
+                push_wall_rect(&mut ground, *side, &geometry, door_w / 2.0, half, 0.0, ground_band);
+                push_wall_rect(&mut ground, *side, &geometry, -door_w / 2.0, door_w / 2.0, door_h, ground_band);
+                let mut door = MassingPart::new(
+                    "ground_floor.entry",
+                    "entry door",
+                    PartKind::Opening,
+                    ground_flag.clone(),
+                    "entry-door",
+                    [0.20, 0.16, 0.13, 1.0],
+                );
+                push_recessed_opening(
+                    &mut ground,
+                    &mut door,
+                    *side,
+                    &geometry,
+                    -door_w / 2.0,
+                    door_w / 2.0,
+                    0.0,
+                    door_h,
+                    0.18,
+                );
+                parts.push(door);
+            } else {
+                // Side/back ground floor: a punched window row, same grammar.
+                build_punched_band(
+                    &mut ground,
+                    &mut glazing,
+                    *side,
+                    &geometry,
+                    0.0,
+                    ground_band,
+                    grid.bays,
+                    1,
+                );
+            }
             parts.push(ground);
         }
 
-        // Openings from the facade's first opening grid.
-        if let Some(facade) = facade_ref {
-            if let Some(grid) = facade.opening_grids.first() {
-                let grid_flag = classify_part(grid.provenance.as_ref());
-                let (opening_material, opening_color) = if grid_flag.documented {
-                    ("glazing", GLASS_COLOR)
-                } else {
-                    ("ghost-glazing", crate::provenance::ghost_palette::HIGHLIGHT)
-                };
-                let grid_path = facade_index
-                    .map(|index| format!("facades[{index}].openingGrids[0]"))
-                    .unwrap_or_else(|| format!("facades[{}].openingGrids[0]", side.as_str()));
-                let mut openings = MassingPart::new(
-                    grid_path,
-                    format!("{} opening grid", side.as_str()),
-                    PartKind::Opening,
-                    grid_flag,
-                    opening_material,
-                    opening_color,
-                );
+        parts.push(wall);
+        if !glazing.is_empty() {
+            parts.push(glazing);
+        }
+    }
 
-                let bays = grid.bay_count.max(1) as usize;
-                let floors_available = ((eave - ground_band) / 2.6).floor().max(1.0) as usize;
-                let floors = (grid.floor_count.max(1) as usize).min(floors_available.max(1));
-                let cell_w = geometry.width / bays as f32;
-                let row_h = (eave - ground_band) / floors as f32;
-                let window_w = cell_w * 0.45;
-                let window_h = (row_h * 0.55).min(1.8);
-                for floor in 0..floors {
-                    let y_center = ground_band + row_h * (floor as f32 + 0.5);
-                    for bay in 0..bays {
-                        let u_center = -geometry.width / 2.0 + cell_w * (bay as f32 + 0.5);
-                        openings.push_quad(
-                            [
-                                wall_point(*side, &geometry, u_center - window_w / 2.0, y_center - window_h / 2.0, 0.04),
-                                wall_point(*side, &geometry, u_center + window_w / 2.0, y_center - window_h / 2.0, 0.04),
-                                wall_point(*side, &geometry, u_center + window_w / 2.0, y_center + window_h / 2.0, 0.04),
-                                wall_point(*side, &geometry, u_center - window_w / 2.0, y_center + window_h / 2.0, 0.04),
-                            ],
-                            geometry.normal,
-                        );
-                    }
-                }
-
-                // Storefront glazing band on the ground floor.
-                if grid.has_storefront_ground && *side == Side::Front && ground_band > 0.0 {
-                    let band_w = geometry.width * 0.82;
-                    let band_h = ground_band * 0.65;
-                    openings.push_quad(
-                        [
-                            wall_point(*side, &geometry, -band_w / 2.0, ground_band * 0.15, 0.05),
-                            wall_point(*side, &geometry, band_w / 2.0, ground_band * 0.15, 0.05),
-                            wall_point(*side, &geometry, band_w / 2.0, ground_band * 0.15 + band_h, 0.05),
-                            wall_point(*side, &geometry, -band_w / 2.0, ground_band * 0.15 + band_h, 0.05),
-                        ],
-                        geometry.normal,
-                    );
-                }
-                if !openings.is_empty() {
-                    parts.push(openings);
-                }
+    // Cornice: a projecting trim band at the eave on masonry buildings. The
+    // window arrangement and the cornice are both grammar inferences unless a
+    // documented ornament says otherwise, so an undocumented cornice renders
+    // ghosted.
+    let primary_material = spec
+        .facades
+        .iter()
+        .map(|facade| facade.primary_material.as_str())
+        .find(|material| !material.is_empty())
+        .unwrap_or(documented_default_material);
+    if is_masonry(primary_material) && eave > 1.5 {
+        let documented_cornice = spec.ornaments.iter().find(|ornament| {
+            ornament.ornament_kind.to_ascii_lowercase().contains("cornice")
+                || ornament.location.to_ascii_lowercase().contains("roof")
+        });
+        let cornice_flag = match documented_cornice {
+            Some(ornament) => classify_part(ornament.provenance.as_ref()),
+            None => {
+                let mut flag = PartFlag::undocumented();
+                flag.confidence = 0.3;
+                flag
             }
-        }
-
-        // Entry door on the front face.
-        if *side == Side::Front {
-            let door_h = 2.2_f32.min(eave * 0.45);
-            let door_w = 1.1_f32.min(geometry.width * 0.2);
-            let mut door = MassingPart::new(
-                "ground_floor.entry",
-                "entry door",
-                PartKind::Opening,
-                if ground_band > 0.0 { ground_flag.clone() } else { flag.clone() },
-                "entry-door",
-                [0.20, 0.16, 0.13, 1.0],
-            );
-            door.push_quad(
-                [
-                    wall_point(*side, &geometry, -door_w / 2.0, 0.0, 0.05),
-                    wall_point(*side, &geometry, door_w / 2.0, 0.0, 0.05),
-                    wall_point(*side, &geometry, door_w / 2.0, door_h, 0.05),
-                    wall_point(*side, &geometry, -door_w / 2.0, door_h, 0.05),
-                ],
-                geometry.normal,
-            );
-            parts.push(door);
-        }
+        };
+        let (cornice_name, cornice_color) = if cornice_flag.documented {
+            ("cornice-stone", [0.66, 0.63, 0.57, 1.0])
+        } else {
+            ("ghost-cornice", crate::provenance::ghost_palette::MID)
+        };
+        let mut cornice = MassingPart::new(
+            documented_cornice
+                .map(|_| "ornaments[cornice]".to_string())
+                .unwrap_or_else(|| "ornaments[cornice].grammar".to_string()),
+            "cornice".to_string(),
+            PartKind::Trim,
+            cornice_flag,
+            cornice_name,
+            cornice_color,
+        );
+        let projection = 0.35_f32;
+        let band_h = (eave * 0.05).clamp(0.35, 0.7);
+        push_box(
+            &mut cornice,
+            [0.0, eave - band_h / 2.0, 0.0],
+            [dims.width + projection * 2.0, band_h, dims.depth + projection * 2.0],
+        );
+        parts.push(cornice);
     }
 
     // Roof.
@@ -894,10 +1200,45 @@ mod tests {
         let roof = model
             .parts
             .iter()
-            .find(|part| part.kind == PartKind::Roof)
+            .find(|part| part.field_path == "roof")
             .unwrap();
+        assert_eq!(roof.kind, PartKind::Roof);
         // 2 quads (8 vertices) + 2 triangles (6 vertices).
         assert_eq!(roof.positions.len(), 14);
+    }
+
+    #[test]
+    fn grammar_synthesizes_windows_when_spec_has_no_grid() {
+        // A facade documented as brick but carrying no opening grid: the
+        // wall reads documented, the windows are a grammar inference.
+        let mut spec = two_story_spec("flat");
+        spec.facades[0].opening_grids.clear();
+        let model = build_massing(&spec).unwrap();
+        let front_glazing = model
+            .parts
+            .iter()
+            .find(|part| part.field_path.starts_with("facades[0].openingGrids[grammar]"))
+            .expect("front facade gets a synthesized grammar grid");
+        assert_eq!(front_glazing.kind, PartKind::Opening);
+        assert!(!front_glazing.flag.documented, "synthesized windows are inference");
+        assert!(!front_glazing.positions.is_empty(), "windows are actually built");
+        let front_wall = model
+            .parts
+            .iter()
+            .find(|part| part.field_path == "facades[0]" && part.kind == PartKind::Wall)
+            .unwrap();
+        assert!(front_wall.flag.documented, "documented brick wall stays documented");
+    }
+
+    #[test]
+    fn masonry_gets_a_cornice() {
+        let model = build_massing(&two_story_spec("flat")).unwrap();
+        let cornice = model
+            .parts
+            .iter()
+            .find(|part| part.kind == PartKind::Trim)
+            .expect("brick building gets a cornice trim");
+        assert_eq!(cornice.positions.len(), 24, "cornice is a 6-face box");
     }
 
     #[test]
@@ -942,6 +1283,13 @@ mod tests {
         assert!((min[1] - 0.0).abs() < 1e-4, "ground plane at y=0");
         assert!((min[0] + max[0]).abs() < 0.2, "centered on x");
         assert!((min[2] + max[2]).abs() < 0.2, "centered on z");
-        assert!((max[0] - min[0] - model.dims.width).abs() < 0.2);
+        // Width span is the wall envelope plus the cornice projection
+        // (0.35 m each side on masonry); never less than the footprint.
+        let x_span = max[0] - min[0];
+        assert!(
+            x_span >= model.dims.width - 0.01 && x_span <= model.dims.width + 0.8,
+            "x span {x_span} within footprint + cornice projection of width {}",
+            model.dims.width
+        );
     }
 }
