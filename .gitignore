@@ -4,3 +4,8 @@
 .env.*
 !.env.example
 
+# Local workspace artifacts
+.DS_Store
+.idea/
+.theorem/
+docs/Planning the planner /
