@@ -17,7 +17,10 @@
 //! growth happens as new schema fields whose resolvers run here.
 
 pub mod civic_research;
+pub mod event_email;
 pub mod event_planner;
+pub mod event_set_time;
+pub mod google_workspace;
 pub mod layer;
 pub mod query;
 pub mod reconstruction;
@@ -41,13 +44,22 @@ use tracing::warn;
 
 use crate::{event_planner_auth, AtlasState};
 use civic_research::MutationRoot as CivicResearchMutationRoot;
+use event_email::EventEmailMutation;
 use event_planner::{EventPlannerMutation, PlannerActor};
+use event_set_time::EventSetTimeMutation;
+use google_workspace::GoogleWorkspaceMutation;
 use query::QueryRoot;
 
 const PLANNER_SESSION_COOKIE: &str = "porchfest_planner_session";
 
 #[derive(MergedObject, Default)]
-pub struct RootMutation(CivicResearchMutationRoot, EventPlannerMutation);
+pub struct RootMutation(
+    CivicResearchMutationRoot,
+    EventPlannerMutation,
+    EventEmailMutation,
+    EventSetTimeMutation,
+    GoogleWorkspaceMutation,
+);
 
 /// The composed GraphQL schema served from this process.
 ///
@@ -409,6 +421,10 @@ mod tests {
         assert!(sdl.contains("eventApplications"));
         assert!(sdl.contains("submitEventApplication"));
         assert!(sdl.contains("requestEventApplicationBilling"));
+        assert!(sdl.contains("eventEmailChannel"));
+        assert!(sdl.contains("eventEmailOutreach"));
+        assert!(sdl.contains("configureEventEmailChannel"));
+        assert!(sdl.contains("sendEventApplicationEmail"));
         assert!(sdl.contains("submittedAtMs"));
         assert!(sdl.contains("placements"));
         assert!(sdl.contains("createPlacement"));

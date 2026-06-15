@@ -29,10 +29,11 @@ Theseus bridge clients.
   `ReconstructionSpec` into a Pascal-style flat node tree for editor,
   correction, texture-provenance, and per-part dossier targeting while keeping
   PostGIS specs as truth.
-- `crates/civic-atlas-outbox-worker` drains both reconstruction projection
-  intents and `reconstruction_jobs` pipeline requests. Pipeline jobs write
-  generated ReconstructionSpecs back to PostGIS and can auto-approve into
-  part-level `building_parts` plus replayable RustyRed projection intents.
+- `crates/civic-atlas-outbox-worker` drains reconstruction projection intents,
+  `reconstruction_jobs` pipeline requests, and Porchfest application receipt
+  emails. Pipeline jobs write generated ReconstructionSpecs back to PostGIS and
+  can auto-approve into part-level `building_parts` plus replayable RustyRed
+  projection intents.
 - `apps/graphql-server` keeps GraphQL browser semantics unchanged.
 - `migrations/0001_tenants_rls.sql` creates tenant tables and row-level
   security defaults.
@@ -103,6 +104,24 @@ cargo run -p civic-atlas-cli -- spec submit path/to/spec.json
   reconstruction jobs, default `4`.
 - `SCENE_FOUNDRY_URI_PREFIX`: asset manifest URI prefix while the Blender/Ray
   renderer is queued or stubbed, default `scene-foundry://queued`.
+- `CIVIC_ATLAS_ROLE`: runtime role for the Docker image. Leave unset for the
+  API server; set to `outbox-worker` for a Railway worker service.
+- `RESEND_API_KEY`: Resend API key consumed by the outbox worker for receipt
+  delivery and by the API server for organizer-triggered outreach.
+- `RESEND_WEBHOOK_SECRET`: Resend/Svix webhook signing secret (`whsec_...`)
+  consumed by the API server at `POST /webhooks/resend`.
+- `PORCHFEST_EMAIL_PROVIDER`: provider label for planner channel status,
+  default `resend`.
+- `PORCHFEST_EMAIL_FROM`: verified sender for Porchfest application emails,
+  for example `Carriage Town Porchfest <porchfest@cthna.org>`.
+- `PORCHFEST_APPLICATION_NOTIFY_TO`: comma- or semicolon-separated organizer
+  notification recipients.
+- `PORCHFEST_EMAIL_REPLY_TO`: optional Reply-To address for applicant
+  confirmations; defaults to the first notify recipient.
+- `PORCHFEST_EMAIL_CHANNEL_LABEL`: human-readable planner channel label, for
+  example `Railway: civic-atlas-outbox-worker`.
+- `PORCHFEST_EMAIL_BATCH_SIZE`: application receipt email batch size, default
+  `8`.
 
 ## Related Repos
 

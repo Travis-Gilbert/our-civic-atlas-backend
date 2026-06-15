@@ -1,0 +1,10 @@
+.git
+.DS_Store
+**/.DS_Store
+.env
+.env.*
+.idea
+.theorem
+target
+apps/graphql-server/node_modules
+docs/Planning the planner *

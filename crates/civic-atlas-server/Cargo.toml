@@ -24,6 +24,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
+svix.workspace = true
 tenant-resolver = { path = "../tenant-resolver" }
 tokio.workspace = true
 tonic.workspace = true

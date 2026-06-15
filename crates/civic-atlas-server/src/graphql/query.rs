@@ -13,7 +13,10 @@
 
 use async_graphql::{MergedObject, Object};
 
+use crate::graphql::event_email::EventEmailQuery;
 use crate::graphql::event_planner::EventPlannerQuery;
+use crate::graphql::event_set_time::EventSetTimeQuery;
+use crate::graphql::google_workspace::GoogleWorkspaceQuery;
 use crate::graphql::layer::LayerQuery;
 use crate::graphql::reconstruction::ReconstructionQuery;
 use crate::graphql::traffic::TrafficQuery;
@@ -35,6 +38,9 @@ pub struct QueryRoot(
     CoreQuery,
     ReconstructionQuery,
     EventPlannerQuery,
+    EventEmailQuery,
+    EventSetTimeQuery,
+    GoogleWorkspaceQuery,
     TrafficQuery,
     LayerQuery,
 );

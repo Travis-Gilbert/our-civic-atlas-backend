@@ -399,13 +399,10 @@ pub fn reconstruction_from_spec(spec: &ReconstructionSpec) -> HistoricalReconstr
         .filter(|a| a.asset_type.to_ascii_lowercase().contains("scene"))
         .filter(|a| !a.uri.is_empty())
         .collect();
-    let renderable_geometry_url = scene_assets
-        .iter()
-        .map(|a| a.uri.clone())
-        .find(|uri| {
-            let lower = uri.to_ascii_lowercase();
-            lower.ends_with(".glb") || lower.ends_with(".gltf")
-        });
+    let renderable_geometry_url = scene_assets.iter().map(|a| a.uri.clone()).find(|uri| {
+        let lower = uri.to_ascii_lowercase();
+        lower.ends_with(".glb") || lower.ends_with(".gltf")
+    });
     let provenance_record_url = scene_assets
         .iter()
         .map(|a| a.uri.clone())

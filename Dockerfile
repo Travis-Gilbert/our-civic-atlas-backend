@@ -39,10 +39,9 @@ WORKDIR /build
 # over incremental rebuild cache hits; the prod image is a one-shot.
 COPY . .
 
-# Build only the API server. The CLI and outbox worker live in the
-# same workspace but ship as separate Railway services (each can
-# point at this same repo with its own startCommand).
-RUN cargo build --release --bin civic-atlas-server
+# Build the API server plus the outbox worker. Railway can run separate
+# services from the same image by setting CIVIC_ATLAS_ROLE.
+RUN cargo build --release --bin civic-atlas-server --bin civic-atlas-outbox-worker
 
 
 # --- stage 2: runtime -------------------------------------------------
@@ -59,13 +58,14 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Copy only the release binary out of the builder stage.
+# Copy release binaries out of the builder stage.
 COPY --from=builder /build/target/release/civic-atlas-server /app/civic-atlas-server
+COPY --from=builder /build/target/release/civic-atlas-outbox-worker /app/civic-atlas-outbox-worker
 
 # Document the port. Railway injects PORT at runtime; main.rs binds
 # to 0.0.0.0:$PORT via the env-var fallback added in 024241d.
 EXPOSE 8080
 
-# Use exec form so the process gets PID 1 and shuts down cleanly on
+# Use exec so the selected process gets PID 1 and shuts down cleanly on
 # SIGTERM (Railway uses SIGTERM for graceful shutdown).
-ENTRYPOINT ["/app/civic-atlas-server"]
+ENTRYPOINT ["/bin/sh", "-c", "if [ \"$CIVIC_ATLAS_ROLE\" = \"outbox-worker\" ]; then exec /app/civic-atlas-outbox-worker; else exec /app/civic-atlas-server; fi"]

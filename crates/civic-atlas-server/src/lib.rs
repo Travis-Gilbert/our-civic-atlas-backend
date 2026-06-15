@@ -1,4 +1,5 @@
 pub mod corrections;
+pub mod event_email;
 pub mod event_planner;
 pub mod event_planner_auth;
 pub mod fixture;
@@ -1746,6 +1747,10 @@ pub fn http_router(state: AtlasState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/sse/event-planner", get(event_planner_sse))
+        .route(
+            "/webhooks/resend",
+            axum::routing::post(event_email::resend_webhook),
+        )
         .route(
             "/civic_atlas.v1.CivicAtlasService/ListPlaces",
             axum::routing::post(list_places_json),
