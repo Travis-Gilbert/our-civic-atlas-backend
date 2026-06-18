@@ -2242,7 +2242,9 @@ fn require_application_category(category: &str) -> Result<String, Status> {
     match category.trim().to_lowercase().as_str() {
         "musician" | "music" | "band" => Ok("musician".to_string()),
         "entertainer" | "performer" => Ok("entertainer".to_string()),
-        "other" | "organization" | "org" | "community" => Ok("other".to_string()),
+        "other" | "organization" | "org" | "community" | "something_else" | "something else" => {
+            Ok("other".to_string())
+        }
         "vendor" => Ok("vendor".to_string()),
         _ => Err(Status::invalid_argument(
             "category must be one of musician, vendor, entertainer, other",
@@ -2496,6 +2498,7 @@ mod tests {
             ("performer", "entertainer"),
             ("organization", "other"),
             ("community", "other"),
+            ("something_else", "other"),
         ];
 
         for (raw, expected) in cases {
