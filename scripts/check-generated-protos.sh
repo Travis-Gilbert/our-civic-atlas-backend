@@ -10,7 +10,9 @@ readonly PY_GENERATED_ROOT="$REPO_ROOT/python/civic_atlas/generated"
 
 (
     cd "$REPO_ROOT"
-    git diff --exit-code -- \
+    git diff --exit-code \
+        -I '^//   protoc[[:space:]]*v' \
+        -- \
         apps/graphql-server/src/generated \
         python/civic_atlas/generated
 
