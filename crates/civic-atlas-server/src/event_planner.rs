@@ -152,9 +152,24 @@ impl EventPlannerService for EventPlannerGrpcService {
         let mut tx = pool.begin().await.map_err(db_status)?;
         let tenant_id = resolve_tenant_id(&mut tx, tenant.as_str()).await?;
         set_transaction_tenant(&mut tx, tenant_id).await?;
+        let Some(event_layer_id) = find_event_layer_id(&mut tx, tenant_id, slug).await? else {
+            tx.commit().await.map_err(db_status)?;
+            return Ok(Response::new(EventApplicationListResponse {
+                applications: Vec::new(),
+            }));
+        };
 
         let category_filter = request.category.trim();
         let status_filter = request.status.trim();
+        if let Some(valkey) = self.state.valkey_client() {
+            if let Some(cached) = valkey
+                .get_event_applications(tenant_id, event_layer_id, category_filter, status_filter)
+                .await
+            {
+                tx.rollback().await.ok();
+                return Ok(Response::new(cached));
+            }
+        }
         let rows = sqlx::query(
             r#"
             SELECT
@@ -182,10 +197,8 @@ impl EventPlannerService for EventPlannerGrpcService {
                 a.updated_at,
                 a.version
             FROM event_applications a
-            JOIN event_layers l
-              ON l.id = a.event_layer_id AND l.tenant_id = a.tenant_id
             WHERE a.tenant_id = $1
-              AND l.slug = $2
+              AND a.event_layer_id = $2
               AND ($3 = '' OR a.category = $3)
               AND ($4 = '' OR a.status = $4)
             ORDER BY a.created_at DESC, a.display_name ASC
@@ -202,7 +215,19 @@ impl EventPlannerService for EventPlannerGrpcService {
         tx.commit().await.map_err(db_status)?;
 
         let applications = rows.iter().map(application_from_row).collect();
-        Ok(Response::new(EventApplicationListResponse { applications }))
+        let response = EventApplicationListResponse { applications };
+        if let Some(valkey) = self.state.valkey_client() {
+            valkey
+                .put_event_applications(
+                    tenant_id,
+                    event_layer_id,
+                    category_filter,
+                    status_filter,
+                    &response,
+                )
+                .await;
+        }
+        Ok(Response::new(response))
     }
 
     async fn submit_event_application(
@@ -222,6 +247,13 @@ impl EventPlannerService for EventPlannerGrpcService {
         let source_key =
             normalize_application_source_key(&req.source_key, &category, &contact_email);
         let submitted_at = ms_to_offset_datetime(req.submitted_at_ms);
+        if req.source_key.trim().is_empty() {
+            if let Some(valkey) = self.state.valkey_client() {
+                valkey
+                    .check_public_application_submit_rate(tenant.as_str(), slug, &contact_email)
+                    .await?;
+            }
+        }
 
         let pool = self.pool()?;
         let mut tx = pool.begin().await.map_err(db_status)?;
@@ -285,6 +317,8 @@ impl EventPlannerService for EventPlannerGrpcService {
                     NULLIF($8, ''), NULLIF($9, ''), $10, NULLIF($11, ''),
                     $12, $13, 'submitted', $14, COALESCE($15, now()), COALESCE($15, now())
                 )
+                ON CONFLICT (tenant_id, event_layer_id, source_key)
+                DO NOTHING
                 RETURNING *
             )
             SELECT
@@ -319,7 +353,7 @@ impl EventPlannerService for EventPlannerGrpcService {
         .bind(&category)
         .bind(display_name)
         .bind(req.contact_name.trim())
-        .bind(contact_email)
+        .bind(&contact_email)
         .bind(req.contact_phone.trim())
         .bind(req.city.trim())
         .bind(req.bio.trim())
@@ -329,11 +363,22 @@ impl EventPlannerService for EventPlannerGrpcService {
         .bind(SqlJson(planning_payload.clone()))
         .bind(&source_key)
         .bind(submitted_at)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(db_status)?;
 
-        let application = application_from_row(&row);
+        let (application, created, duplicate) = if let Some(row) = row {
+            (application_from_row(&row), true, false)
+        } else {
+            let existing = sqlx::query(&existing_sql)
+                .bind(tenant_id)
+                .bind(event_layer_id)
+                .bind(&source_key)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(db_status)?;
+            (application_from_row(&existing), false, true)
+        };
         let backup_payload = json!({
             "applicationId": application.id,
             "eventLayerId": application.event_layer_id,
@@ -348,11 +393,18 @@ impl EventPlannerService for EventPlannerGrpcService {
             insert_backup_receipt(&mut tx, tenant_id, &application.id, backup_payload).await?;
 
         tx.commit().await.map_err(db_status)?;
+        if created {
+            if let Some(valkey) = self.state.valkey_client() {
+                valkey
+                    .invalidate_event_applications(tenant_id, event_layer_id)
+                    .await;
+            }
+        }
 
         Ok(Response::new(EventApplicationSubmitResponse {
             application: Some(application),
-            created: true,
-            duplicate: false,
+            created,
+            duplicate,
             backup_recorded,
         }))
     }
@@ -541,6 +593,13 @@ impl EventPlannerService for EventPlannerGrpcService {
             .map_err(db_status)?;
         let application = application_from_row(&application_row);
         tx.commit().await.map_err(db_status)?;
+        if let Some(valkey) = self.state.valkey_client() {
+            if let Ok(event_layer_id) = parse_uuid(&application.event_layer_id, "event_layer_id") {
+                valkey
+                    .invalidate_event_applications(tenant_id, event_layer_id)
+                    .await;
+            }
+        }
 
         Ok(Response::new(EventApplicationBillingResponse {
             billing: Some(billing),
@@ -2376,14 +2435,23 @@ async fn resolve_event_layer_id(
     tenant_id: Uuid,
     slug: &str,
 ) -> Result<Uuid, Status> {
+    find_event_layer_id(tx, tenant_id, slug)
+        .await?
+        .ok_or_else(|| Status::not_found(format!("event layer not found: {slug}")))
+}
+
+async fn find_event_layer_id(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    slug: &str,
+) -> Result<Option<Uuid>, Status> {
     let row = sqlx::query(r#"SELECT id FROM event_layers WHERE tenant_id = $1 AND slug = $2"#)
         .bind(tenant_id)
         .bind(slug)
         .fetch_optional(&mut **tx)
         .await
         .map_err(db_status)?;
-    row.and_then(|r| r.try_get::<Uuid, _>("id").ok())
-        .ok_or_else(|| Status::not_found(format!("event layer not found: {slug}")))
+    Ok(row.and_then(|r| r.try_get::<Uuid, _>("id").ok()))
 }
 
 /// Look up an event_planner_users.display_name. Returns Ok(None) when

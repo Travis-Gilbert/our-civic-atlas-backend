@@ -7,6 +7,7 @@ pub mod graphql;
 pub mod reconstruction;
 pub mod tenant_db;
 pub mod validation;
+pub mod valkey;
 
 use std::{convert::Infallible, env, net::SocketAddr, sync::Arc};
 
@@ -45,10 +46,13 @@ use tonic::{Request, Response, Status};
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::valkey::ValkeyClient;
+
 #[derive(Clone)]
 pub struct AtlasState {
     places: Arc<Vec<CivicObject>>,
     db: Option<PgPool>,
+    valkey: Option<ValkeyClient>,
 }
 
 impl AtlasState {
@@ -71,9 +75,11 @@ impl AtlasState {
             }
             _ => None,
         };
+        let valkey = ValkeyClient::from_env();
         Ok(Self {
             places: Arc::new(places),
             db,
+            valkey,
         })
     }
 
@@ -87,6 +93,10 @@ impl AtlasState {
 
     pub fn db_pool(&self) -> Option<&PgPool> {
         self.db.as_ref()
+    }
+
+    pub fn valkey_client(&self) -> Option<&ValkeyClient> {
+        self.valkey.as_ref()
     }
 
     /// Apply embedded SQL migrations against the live PostGIS pool.
@@ -2049,6 +2059,7 @@ mod tests {
         let state = AtlasState {
             places: Arc::new(fixture::seed_places("flint")),
             db: None,
+            valkey: None,
         };
 
         assert_eq!(state.places_for_tenant("flint").len(), 3);
@@ -2117,6 +2128,7 @@ mod tests {
         let state = AtlasState {
             places: Arc::new(fixture::seed_places("flint")),
             db: None,
+            valkey: None,
         };
 
         let result = event_planner_sse(

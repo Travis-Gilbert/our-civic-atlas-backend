@@ -19,6 +19,7 @@ civic-atlas-types = { path = "../civic-atlas-types" }
 futures-core.workspace = true
 prost.workspace = true
 reqwest.workspace = true
+redis.workspace = true
 rustyred-client = { path = "../rustyred-client" }
 serde.workspace = true
 serde_json.workspace = true

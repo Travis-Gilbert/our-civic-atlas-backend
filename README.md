@@ -91,6 +91,19 @@ cargo run -p civic-atlas-cli -- spec submit path/to/spec.json
 - `CIVIC_ATLAS_PLACES_FIXTURE`: optional GeoJSON places fixture for the first
   `placesList` migration path.
 - `CIVIC_ATLAS_DEFAULT_TENANT`: default fixture tenant, default `flint`.
+- `VALKEY_URL`: optional Valkey/Redis-compatible URL. When set, the API server
+  uses Valkey only for disposable PorchFest submit rate counters and short-TTL
+  application list cache entries; Postgres remains the source of truth. Keep
+  Valkey private to backend services because cached list payloads include
+  applicant contact fields.
+- `VALKEY_KEY_PREFIX`: optional key prefix for shared Valkey deployments,
+  default `civic-atlas`.
+- `VALKEY_EVENT_APPLICATION_LIST_TTL_SECS`: TTL for cached application list
+  responses, default `10`. Set to `0` to disable the read cache.
+- `VALKEY_EVENT_APPLICATION_SUBMIT_RATE_LIMIT`: public form submissions allowed
+  per email/window, default `8`. Set to `0` to disable the submit counter.
+- `VALKEY_EVENT_APPLICATION_SUBMIT_RATE_WINDOW_SECS`: submit counter window,
+  default `600`.
 - `THEOREM_SEARCH_URL`: gRPC URL for the Rust-native `theseus_search.v1.SearchService`
   host. This is the search dial for `civic_research`. If unset, the resolver falls
   back to `THESEUS_BRIDGE_URL` (legacy Django bridge) only so production does not
