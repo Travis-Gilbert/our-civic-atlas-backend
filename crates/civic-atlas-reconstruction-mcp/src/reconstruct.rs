@@ -224,10 +224,7 @@ pub async fn run_reconstruct(input: ReconstructInput) -> Result<ReconstructOutpu
             .map(|(idx, evidence)| evidence_source_id(evidence, idx))
             .collect(),
         dossier_path: String::new(),
-        attributes: HashMap::from([(
-            "block_id".to_string(),
-            format!("block:{}", input.parcel_id),
-        )]),
+        attributes: HashMap::from([("block_id".to_string(), format!("block:{}", input.parcel_id))]),
     };
 
     let direct_artifacts: Vec<Artifact> = input
@@ -294,14 +291,19 @@ pub async fn run_reconstruct(input: ReconstructInput) -> Result<ReconstructOutpu
         .len();
 
     // Read the provenance.json the renderer wrote, inline it as JSON.
-    let provenance_value = match manifest.assets.iter().find(|asset| asset.uri.ends_with(".json")) {
+    let provenance_value = match manifest
+        .assets
+        .iter()
+        .find(|asset| asset.uri.ends_with(".json"))
+    {
         Some(record_asset) => {
             let record_path = asset_path(&asset_root, &public_base_url, &record_asset.uri);
-            let bytes = tokio::fs::read(&record_path)
-                .await
-                .with_context(|| format!("reading provenance record at {}", record_path.display()))?;
-            serde_json::from_slice(&bytes)
-                .with_context(|| format!("parsing provenance record at {}", record_path.display()))?
+            let bytes = tokio::fs::read(&record_path).await.with_context(|| {
+                format!("reading provenance record at {}", record_path.display())
+            })?;
+            serde_json::from_slice(&bytes).with_context(|| {
+                format!("parsing provenance record at {}", record_path.display())
+            })?
         }
         None => serde_json::Value::Null,
     };
@@ -364,10 +366,7 @@ fn evidence_to_artifact(evidence: &EvidenceInput, index: usize) -> Artifact {
                 attributes.insert("stories".to_string(), serde_json::json!(stories));
             }
             if let Some(material) = evidence.material_code.as_ref() {
-                attributes.insert(
-                    "primary_material".to_string(),
-                    serde_json::json!(material),
-                );
+                attributes.insert("primary_material".to_string(), serde_json::json!(material));
             }
             if let Some(notation) = evidence.notation.as_ref() {
                 attributes.insert("use_type".to_string(), serde_json::json!(notation));

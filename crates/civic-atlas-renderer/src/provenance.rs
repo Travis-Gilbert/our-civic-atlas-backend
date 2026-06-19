@@ -240,12 +240,18 @@ pub fn texture_records(spec: &ReconstructionSpec) -> Vec<TextureProvenanceRecord
                 texture_confidence: texture.texture_confidence,
                 lora_archetype: (!texture.lora_archetype.is_empty())
                     .then(|| texture.lora_archetype.clone()),
-                controlnet_conditioning_source: (!texture.controlnet_conditioning_source.is_empty())
-                    .then(|| texture.controlnet_conditioning_source.clone()),
+                controlnet_conditioning_source: (!texture
+                    .controlnet_conditioning_source
+                    .is_empty())
+                .then(|| texture.controlnet_conditioning_source.clone()),
             });
         }
     }
-    if let Some(texture) = spec.roof.as_ref().and_then(|roof| roof.texture_provenance.as_ref()) {
+    if let Some(texture) = spec
+        .roof
+        .as_ref()
+        .and_then(|roof| roof.texture_provenance.as_ref())
+    {
         records.push(TextureProvenanceRecord {
             node_id: civic_atlas_reconstruction_engine::reconstruction_node_id(spec, "roof"),
             texture_source: texture.texture_source.clone(),
@@ -382,7 +388,13 @@ mod tests {
         assert_eq!(stamped.texture_source, TEXTURE_SOURCE_PROCEDURAL);
         assert!(stamped.texture_confidence.unwrap() > 0.0);
 
-        let roof = spec.roof.as_ref().unwrap().texture_provenance.as_ref().unwrap();
+        let roof = spec
+            .roof
+            .as_ref()
+            .unwrap()
+            .texture_provenance
+            .as_ref()
+            .unwrap();
         assert_eq!(roof.texture_source, TEXTURE_SOURCE_PROCEDURAL);
     }
 }
