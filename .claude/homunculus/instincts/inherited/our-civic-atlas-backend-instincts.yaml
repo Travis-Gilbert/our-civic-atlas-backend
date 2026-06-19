@@ -1,0 +1,336 @@
+# Instincts generated from https://github.com/Travis-Gilbert/our-civic-atlas-backend
+# Generated: 2026-06-19T15:28:11.834Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: our-civic-atlas-backend-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: fix
+
+## Evidence
+
+- 1 commits analyzed
+- Detected conventional commit pattern
+- Examples: fix(porchfest): add valkey submit guard
+
+---
+id: our-civic-atlas-backend-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Commit Length
+
+## Action
+
+Keep commit messages concise (~39 characters)
+
+## Evidence
+
+- Average commit message length: 39 chars
+- Based on 1 commits
+
+---
+id: our-civic-atlas-backend-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Naming Files
+
+## Action
+
+Use PascalCase naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: PascalCase
+
+---
+id: our-civic-atlas-backend-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: our-civic-atlas-backend-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: our-civic-atlas-backend-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: our-civic-atlas-backend-instinct-file-naming
+trigger: "When creating a new source file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Instinct File Naming
+
+## Action
+
+Name the file using PascalCase
+
+## Evidence
+
+- Pattern in files: PascalCase naming convention detected in file names
+
+---
+id: our-civic-atlas-backend-instinct-function-naming
+trigger: "When defining a new function"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Instinct Function Naming
+
+## Action
+
+Name the function using camelCase
+
+## Evidence
+
+- Pattern in functions: camelCase naming convention detected
+
+---
+id: our-civic-atlas-backend-instinct-class-naming
+trigger: "When defining a new class or struct"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Instinct Class Naming
+
+## Action
+
+Name the class or struct using PascalCase
+
+## Evidence
+
+- Pattern in classes: PascalCase naming convention detected
+
+---
+id: our-civic-atlas-backend-instinct-constant-naming
+trigger: "When declaring a constant"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Instinct Constant Naming
+
+## Action
+
+Name the constant using SCREAMING_SNAKE_CASE
+
+## Evidence
+
+- Pattern in constants: SCREAMING_SNAKE_CASE naming convention detected
+
+---
+id: our-civic-atlas-backend-instinct-import-style
+trigger: "When importing modules"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Instinct Import Style
+
+## Action
+
+Use relative import paths
+
+## Evidence
+
+- Pattern in imports: relative import style detected
+
+---
+id: our-civic-atlas-backend-instinct-export-style
+trigger: "When exporting modules or items"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in exports: named export style detected
+
+---
+id: our-civic-atlas-backend-instinct-git-commit-prefix
+trigger: "When writing a commit message for a bug fix"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Instinct Git Commit Prefix
+
+## Action
+
+Prefix the commit message with 'fix' following conventional commit format
+
+## Evidence
+
+- Seen in commit: 'fix(porchfest): add valkey submit guard'
+
+---
+id: our-civic-atlas-backend-instinct-git-commit-length
+trigger: "When writing a commit message"
+confidence: 0.7
+domain: git
+source: repo-analysis
+source_repo: Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Instinct Git Commit Length
+
+## Action
+
+Keep the commit message concise, around 39 characters on average
+
+## Evidence
+
+- Pattern in commits: average length 39 characters
+
+---
+id: our-civic-atlas-backend-instinct-git-commit-format
+trigger: "When writing a commit message"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Instinct Git Commit Format
+
+## Action
+
+Use the format: <type>(<scope>): <description>
+
+## Evidence
+
+- Pattern in commits: conventional format with type and scope
+
+---
+id: our-civic-atlas-backend-instinct-test-location
+trigger: "When adding or updating tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Instinct Test Location
+
+## Action
+
+Place test files in a separate directory from source files
+
+## Evidence
+
+- Architecture: testLocation is 'separate'
+
+---
+id: our-civic-atlas-backend-instinct-architecture-crates-folder
+trigger: "When adding a new module or feature"
+confidence: 0.8
+domain: architecture
+source: repo-analysis
+source_repo: Travis-Gilbert/our-civic-atlas-backend
+---
+
+# Our Civic Atlas Backend Instinct Architecture Crates Folder
+
+## Action
+
+Place it under the 'crates' folder
+
+## Evidence
+
+- Architecture: 'crates' is a common folder
+
