@@ -38,7 +38,7 @@ fn whaley_like_fixture() -> InMemoryRepository {
                 [-83.7082, 43.01196170],
                 [-83.7082, 43.0118]
             ]]}"#
-            .to_string(),
+                .to_string(),
             time_start_ms: Some(-2_682_288_000_000),
             time_end_ms: None,
             confidence: 1.0,
@@ -49,27 +49,25 @@ fn whaley_like_fixture() -> InMemoryRepository {
                 "block:carriage-town".to_string(),
             )]),
         }],
-        direct_artifacts: vec![
-            Artifact {
-                artifact_id: "artifact:sanborn:flint-1899-s18".to_string(),
-                artifact_key: "sanborn-flint-1899-s18".to_string(),
-                source_type: "sanborn_sheet".to_string(),
-                title: "Sanborn Flint 1899 sheet 18".to_string(),
-                uri: "https://www.loc.gov/resource/g4114fm.g4114fm_g061121899/?sp=18".to_string(),
-                citation: "Sanborn Map Company, Flint 1899".to_string(),
-                captured_at_ms: Some(-2_240_524_800_000),
-                fetched_at_ms: None,
-                content_hash: "sha256-fixture-sanborn".to_string(),
-                decoded: DecodedArtifact::SanbornSheet {
-                    footprint_wkt: None,
-                    story_count: Some(3),
-                    material_code: Some("red".to_string()),
-                    notation: None,
-                    roof_form: Some("hipped".to_string()),
-                },
-                metadata: BTreeMap::new(),
+        direct_artifacts: vec![Artifact {
+            artifact_id: "artifact:sanborn:flint-1899-s18".to_string(),
+            artifact_key: "sanborn-flint-1899-s18".to_string(),
+            source_type: "sanborn_sheet".to_string(),
+            title: "Sanborn Flint 1899 sheet 18".to_string(),
+            uri: "https://www.loc.gov/resource/g4114fm.g4114fm_g061121899/?sp=18".to_string(),
+            citation: "Sanborn Map Company, Flint 1899".to_string(),
+            captured_at_ms: Some(-2_240_524_800_000),
+            fetched_at_ms: None,
+            content_hash: "sha256-fixture-sanborn".to_string(),
+            decoded: DecodedArtifact::SanbornSheet {
+                footprint_wkt: None,
+                story_count: Some(3),
+                material_code: Some("red".to_string()),
+                notation: None,
+                roof_form: Some("hipped".to_string()),
             },
-        ],
+            metadata: BTreeMap::new(),
+        }],
         adjacent_artifacts: Vec::new(),
         graph: None,
     }
@@ -107,8 +105,8 @@ async fn main() -> anyhow::Result<()> {
     let store = Arc::new(LocalDirAssetStore::new(&asset_dir, &base_url));
     let renderer = SceneFoundryRenderer::new(store);
 
-    let output = run_full_pipeline(request, &repository, &embeddings, &prior_model, &renderer)
-        .await?;
+    let output =
+        run_full_pipeline(request, &repository, &embeddings, &prior_model, &renderer).await?;
 
     let manifest = &output.asset_manifest;
     println!("{}", serde_json::to_string_pretty(manifest)?);
@@ -127,7 +125,11 @@ async fn main() -> anyhow::Result<()> {
             .trim_start_matches(&format!("{}/", base_url.trim_end_matches('/')));
         let path = std::path::Path::new(&asset_dir).join(key);
         anyhow::ensure!(path.exists(), "asset bytes missing at {}", path.display());
-        eprintln!("asset on disk: {} ({} bytes)", path.display(), std::fs::metadata(&path)?.len());
+        eprintln!(
+            "asset on disk: {} ({} bytes)",
+            path.display(),
+            std::fs::metadata(&path)?.len()
+        );
     }
 
     let spec = &output.merged.spec;
@@ -136,9 +138,18 @@ async fn main() -> anyhow::Result<()> {
         spec.spec_id,
         spec.spec_version,
         spec.mass.as_ref().map(|mass| mass.stories).unwrap_or(0),
-        spec.mass.as_ref().and_then(|mass| mass.width.as_ref()).and_then(|range| range.max),
-        spec.mass.as_ref().and_then(|mass| mass.depth.as_ref()).and_then(|range| range.max),
-        spec.roof.as_ref().map(|roof| roof.roof_type.as_str()).unwrap_or("-"),
+        spec.mass
+            .as_ref()
+            .and_then(|mass| mass.width.as_ref())
+            .and_then(|range| range.max),
+        spec.mass
+            .as_ref()
+            .and_then(|mass| mass.depth.as_ref())
+            .and_then(|range| range.max),
+        spec.roof
+            .as_ref()
+            .map(|roof| roof.roof_type.as_str())
+            .unwrap_or("-"),
     );
     eprintln!("render gate: PASS (status=completed, real content hashes, bytes on disk)");
     Ok(())

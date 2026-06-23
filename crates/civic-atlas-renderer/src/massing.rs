@@ -186,7 +186,10 @@ fn range_value_m(range: Option<&DimensionRange>) -> Option<f64> {
 /// part's provenance flag.
 pub fn dims_from_spec(spec: &ReconstructionSpec) -> Dims {
     let mass = spec.mass.as_ref();
-    let stories = mass.map(|mass| mass.stories).filter(|s| *s > 0).unwrap_or(2);
+    let stories = mass
+        .map(|mass| mass.stories)
+        .filter(|s| *s > 0)
+        .unwrap_or(2);
     let height = mass
         .and_then(|mass| range_value_m(mass.height.as_ref()))
         .unwrap_or(stories as f64 * DEFAULT_STORY_HEIGHT_M);
@@ -473,27 +476,57 @@ fn push_box(part: &mut MassingPart, center: [f32; 3], size: [f32; 3]) {
     let [cx, cy, cz] = center;
     let (hx, hy, hz) = (size[0] / 2.0, size[1] / 2.0, size[2] / 2.0);
     part.push_quad(
-        [[cx - hx, cy - hy, cz + hz], [cx + hx, cy - hy, cz + hz], [cx + hx, cy + hy, cz + hz], [cx - hx, cy + hy, cz + hz]],
+        [
+            [cx - hx, cy - hy, cz + hz],
+            [cx + hx, cy - hy, cz + hz],
+            [cx + hx, cy + hy, cz + hz],
+            [cx - hx, cy + hy, cz + hz],
+        ],
         [0.0, 0.0, 1.0],
     );
     part.push_quad(
-        [[cx + hx, cy - hy, cz - hz], [cx - hx, cy - hy, cz - hz], [cx - hx, cy + hy, cz - hz], [cx + hx, cy + hy, cz - hz]],
+        [
+            [cx + hx, cy - hy, cz - hz],
+            [cx - hx, cy - hy, cz - hz],
+            [cx - hx, cy + hy, cz - hz],
+            [cx + hx, cy + hy, cz - hz],
+        ],
         [0.0, 0.0, -1.0],
     );
     part.push_quad(
-        [[cx + hx, cy - hy, cz + hz], [cx + hx, cy - hy, cz - hz], [cx + hx, cy + hy, cz - hz], [cx + hx, cy + hy, cz + hz]],
+        [
+            [cx + hx, cy - hy, cz + hz],
+            [cx + hx, cy - hy, cz - hz],
+            [cx + hx, cy + hy, cz - hz],
+            [cx + hx, cy + hy, cz + hz],
+        ],
         [1.0, 0.0, 0.0],
     );
     part.push_quad(
-        [[cx - hx, cy - hy, cz - hz], [cx - hx, cy - hy, cz + hz], [cx - hx, cy + hy, cz + hz], [cx - hx, cy + hy, cz - hz]],
+        [
+            [cx - hx, cy - hy, cz - hz],
+            [cx - hx, cy - hy, cz + hz],
+            [cx - hx, cy + hy, cz + hz],
+            [cx - hx, cy + hy, cz - hz],
+        ],
         [-1.0, 0.0, 0.0],
     );
     part.push_quad(
-        [[cx - hx, cy + hy, cz + hz], [cx + hx, cy + hy, cz + hz], [cx + hx, cy + hy, cz - hz], [cx - hx, cy + hy, cz - hz]],
+        [
+            [cx - hx, cy + hy, cz + hz],
+            [cx + hx, cy + hy, cz + hz],
+            [cx + hx, cy + hy, cz - hz],
+            [cx - hx, cy + hy, cz - hz],
+        ],
         [0.0, 1.0, 0.0],
     );
     part.push_quad(
-        [[cx - hx, cy - hy, cz - hz], [cx + hx, cy - hy, cz - hz], [cx + hx, cy - hy, cz + hz], [cx - hx, cy - hy, cz + hz]],
+        [
+            [cx - hx, cy - hy, cz - hz],
+            [cx + hx, cy - hy, cz - hz],
+            [cx + hx, cy - hy, cz + hz],
+            [cx - hx, cy - hy, cz + hz],
+        ],
         [0.0, -1.0, 0.0],
     );
 }
@@ -562,7 +595,10 @@ fn effective_grid(
 /// Normalize a spec facade_side string onto a plan side.
 fn match_side(facade_side: &str) -> Option<Side> {
     let normalized = facade_side.to_ascii_lowercase();
-    if normalized.contains("front") || normalized.contains("primary") || normalized.contains("street") {
+    if normalized.contains("front")
+        || normalized.contains("primary")
+        || normalized.contains("street")
+    {
         Some(Side::Front)
     } else if normalized.contains("rear") || normalized.contains("back") {
         Some(Side::Back)
@@ -604,7 +640,9 @@ fn assign_facades(spec: &ReconstructionSpec) -> Vec<(Side, Option<(usize, &Facad
         }
     }
     for (index, facade) in unmatched {
-        if let Some((_, occupant)) = assignment.iter_mut().find(|(_, occupant)| occupant.is_none())
+        if let Some((_, occupant)) = assignment
+            .iter_mut()
+            .find(|(_, occupant)| occupant.is_none())
         {
             *occupant = Some((index, facade));
         }
@@ -630,7 +668,9 @@ pub fn build_massing(spec: &ReconstructionSpec) -> Result<MassingModel> {
 
     let rise = match roof_form {
         RoofForm::Flat => 0.0,
-        RoofForm::Gable | RoofForm::Hipped => (dims.height * 0.25).min(dims.width.min(dims.depth) * 0.6),
+        RoofForm::Gable | RoofForm::Hipped => {
+            (dims.height * 0.25).min(dims.width.min(dims.depth) * 0.6)
+        }
     };
     let eave = dims.height - rise;
     let ground_flag = classify_part(
@@ -721,7 +761,13 @@ pub fn build_massing(spec: &ReconstructionSpec) -> Result<MassingModel> {
         } else {
             stories
         };
-        let grid = effective_grid(*side, *facade, geometry.width, upper_rows, ground_band > 0.0);
+        let grid = effective_grid(
+            *side,
+            *facade,
+            geometry.width,
+            upper_rows,
+            ground_band > 0.0,
+        );
         let (glazing_material, glazing_color) = if grid.flag.documented {
             ("glazing", GLASS_COLOR)
         } else {
@@ -795,10 +841,42 @@ pub fn build_massing(spec: &ReconstructionSpec) -> Result<MassingModel> {
                 let head = (ground_band * 0.9).min(ground_band - 0.2);
                 let pier = (geometry.width - band_w) / 2.0;
                 let half = geometry.width / 2.0;
-                push_wall_rect(&mut ground, *side, &geometry, -half, -half + pier, 0.0, ground_band);
-                push_wall_rect(&mut ground, *side, &geometry, half - pier, half, 0.0, ground_band);
-                push_wall_rect(&mut ground, *side, &geometry, -half + pier, half - pier, 0.0, sill);
-                push_wall_rect(&mut ground, *side, &geometry, -half + pier, half - pier, head, ground_band);
+                push_wall_rect(
+                    &mut ground,
+                    *side,
+                    &geometry,
+                    -half,
+                    -half + pier,
+                    0.0,
+                    ground_band,
+                );
+                push_wall_rect(
+                    &mut ground,
+                    *side,
+                    &geometry,
+                    half - pier,
+                    half,
+                    0.0,
+                    ground_band,
+                );
+                push_wall_rect(
+                    &mut ground,
+                    *side,
+                    &geometry,
+                    -half + pier,
+                    half - pier,
+                    0.0,
+                    sill,
+                );
+                push_wall_rect(
+                    &mut ground,
+                    *side,
+                    &geometry,
+                    -half + pier,
+                    half - pier,
+                    head,
+                    ground_band,
+                );
                 push_recessed_opening(
                     &mut ground,
                     &mut glazing,
@@ -815,9 +893,33 @@ pub fn build_massing(spec: &ReconstructionSpec) -> Result<MassingModel> {
                 let door_h = (ground_band * 0.85).min(2.4);
                 let door_w = 1.2_f32.min(geometry.width * 0.18);
                 let half = geometry.width / 2.0;
-                push_wall_rect(&mut ground, *side, &geometry, -half, -door_w / 2.0, 0.0, ground_band);
-                push_wall_rect(&mut ground, *side, &geometry, door_w / 2.0, half, 0.0, ground_band);
-                push_wall_rect(&mut ground, *side, &geometry, -door_w / 2.0, door_w / 2.0, door_h, ground_band);
+                push_wall_rect(
+                    &mut ground,
+                    *side,
+                    &geometry,
+                    -half,
+                    -door_w / 2.0,
+                    0.0,
+                    ground_band,
+                );
+                push_wall_rect(
+                    &mut ground,
+                    *side,
+                    &geometry,
+                    door_w / 2.0,
+                    half,
+                    0.0,
+                    ground_band,
+                );
+                push_wall_rect(
+                    &mut ground,
+                    *side,
+                    &geometry,
+                    -door_w / 2.0,
+                    door_w / 2.0,
+                    door_h,
+                    ground_band,
+                );
                 let mut door = MassingPart::new(
                     "ground_floor.entry",
                     "entry door",
@@ -872,7 +974,10 @@ pub fn build_massing(spec: &ReconstructionSpec) -> Result<MassingModel> {
         .unwrap_or(documented_default_material);
     if is_masonry(primary_material) && eave > 1.5 {
         let documented_cornice = spec.ornaments.iter().find(|ornament| {
-            ornament.ornament_kind.to_ascii_lowercase().contains("cornice")
+            ornament
+                .ornament_kind
+                .to_ascii_lowercase()
+                .contains("cornice")
                 || ornament.location.to_ascii_lowercase().contains("roof")
         });
         let cornice_flag = match documented_cornice {
@@ -903,7 +1008,11 @@ pub fn build_massing(spec: &ReconstructionSpec) -> Result<MassingModel> {
         push_box(
             &mut cornice,
             [0.0, eave - band_h / 2.0, 0.0],
-            [dims.width + projection * 2.0, band_h, dims.depth + projection * 2.0],
+            [
+                dims.width + projection * 2.0,
+                band_h,
+                dims.depth + projection * 2.0,
+            ],
         );
         parts.push(cornice);
     }
@@ -946,7 +1055,13 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
     [v[0] / length, v[1] / length, v[2] / length]
 }
 
-fn build_roof(roof: &mut MassingPart, dims: &Dims, form: RoofForm, eave: f32, rise: f32) -> Result<()> {
+fn build_roof(
+    roof: &mut MassingPart,
+    dims: &Dims,
+    form: RoofForm,
+    eave: f32,
+    rise: f32,
+) -> Result<()> {
     let half_w = dims.width / 2.0;
     let half_d = dims.depth / 2.0;
     match form {
@@ -1160,7 +1275,11 @@ mod tests {
             unit: "ft".to_string(),
         });
         let dims = dims_from_spec(&spec);
-        assert!((dims.width - 9.7536).abs() < 1e-3, "feet should convert to meters, got {}", dims.width);
+        assert!(
+            (dims.width - 9.7536).abs() < 1e-3,
+            "feet should convert to meters, got {}",
+            dims.width
+        );
         assert_eq!(dims.stories, 2);
     }
 
@@ -1217,17 +1336,29 @@ mod tests {
         let front_glazing = model
             .parts
             .iter()
-            .find(|part| part.field_path.starts_with("facades[0].openingGrids[grammar]"))
+            .find(|part| {
+                part.field_path
+                    .starts_with("facades[0].openingGrids[grammar]")
+            })
             .expect("front facade gets a synthesized grammar grid");
         assert_eq!(front_glazing.kind, PartKind::Opening);
-        assert!(!front_glazing.flag.documented, "synthesized windows are inference");
-        assert!(!front_glazing.positions.is_empty(), "windows are actually built");
+        assert!(
+            !front_glazing.flag.documented,
+            "synthesized windows are inference"
+        );
+        assert!(
+            !front_glazing.positions.is_empty(),
+            "windows are actually built"
+        );
         let front_wall = model
             .parts
             .iter()
             .find(|part| part.field_path == "facades[0]" && part.kind == PartKind::Wall)
             .unwrap();
-        assert!(front_wall.flag.documented, "documented brick wall stays documented");
+        assert!(
+            front_wall.flag.documented,
+            "documented brick wall stays documented"
+        );
     }
 
     #[test]
@@ -1260,10 +1391,7 @@ mod tests {
         assert_eq!(ghost_walls.len(), 3);
         for wall in ghost_walls {
             assert_eq!(wall.material_name, "ghost-wall");
-            assert_eq!(
-                wall.base_color,
-                crate::provenance::ghost_palette::SHADOW
-            );
+            assert_eq!(wall.base_color, crate::provenance::ghost_palette::SHADOW);
         }
     }
 
