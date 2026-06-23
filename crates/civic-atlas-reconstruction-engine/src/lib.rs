@@ -774,17 +774,18 @@ pub fn extract_direct(
                 .map(|focus| focus.geometry_json.as_str())
                 .filter(|geometry| !geometry.trim().is_empty())
                 .or_else(|| {
-                    evidence.direct.iter().find_map(|artifact| match &artifact.decoded {
-                        DecodedArtifact::GisFeature { footprint_wkt, .. }
-                        | DecodedArtifact::SanbornSheet { footprint_wkt, .. } => {
-                            footprint_wkt.as_deref().filter(|wkt| !wkt.trim().is_empty())
-                        }
-                        _ => None,
-                    })
+                    evidence
+                        .direct
+                        .iter()
+                        .find_map(|artifact| match &artifact.decoded {
+                            DecodedArtifact::GisFeature { footprint_wkt, .. }
+                            | DecodedArtifact::SanbornSheet { footprint_wkt, .. } => footprint_wkt
+                                .as_deref()
+                                .filter(|wkt| !wkt.trim().is_empty()),
+                            _ => None,
+                        })
                 });
-            if let Some((width_m, depth_m)) =
-                footprint_geometry.and_then(footprint_plan_dims_m)
-            {
+            if let Some((width_m, depth_m)) = footprint_geometry.and_then(footprint_plan_dims_m) {
                 if mass.width.is_none() {
                     mass.width = Some(DimensionRange {
                         min: Some(width_m),
@@ -3432,10 +3433,7 @@ mod tests {
     #[async_trait]
     impl AssetGenerator for StaticManifestGenerator {
         async fn generate(&self, merged: &MergedReconstructionSpec) -> Result<AssetManifest> {
-            let manifest_id = format!(
-                "test:{}:v{}",
-                merged.spec.spec_id, merged.spec.spec_version
-            );
+            let manifest_id = format!("test:{}:v{}", merged.spec.spec_id, merged.spec.spec_version);
             Ok(AssetManifest {
                 manifest_id: manifest_id.clone(),
                 spec_id: merged.spec.spec_id.clone(),
@@ -3519,9 +3517,19 @@ mod tests {
             [-83.7082, 43.0118]
         ]]}"#;
         let (width, depth) = footprint_plan_dims_m(geojson).expect("geojson dims");
-        let (long_side, short_side) = if width >= depth { (width, depth) } else { (depth, width) };
-        assert!((long_side - 18.0).abs() < 0.5, "long side ~18m, got {long_side}");
-        assert!((short_side - 14.0).abs() < 0.5, "short side ~14m, got {short_side}");
+        let (long_side, short_side) = if width >= depth {
+            (width, depth)
+        } else {
+            (depth, width)
+        };
+        assert!(
+            (long_side - 18.0).abs() < 0.5,
+            "long side ~18m, got {long_side}"
+        );
+        assert!(
+            (short_side - 14.0).abs() < 0.5,
+            "short side ~14m, got {short_side}"
+        );
 
         let wkt = "POLYGON ((-83.7082 43.0118, -83.70802806 43.0118, \
                    -83.70802806 43.01196170, -83.7082 43.01196170, -83.7082 43.0118))";
@@ -3548,7 +3556,7 @@ mod tests {
                     [-83.7082, 43.01196170],
                     [-83.7082, 43.0118]
                 ]]}"#
-                .to_string(),
+                    .to_string(),
                 time_start_ms: Some(0),
                 time_end_ms: None,
                 confidence: 1.0,
@@ -3572,7 +3580,10 @@ mod tests {
         let short_side = width_m.min(depth_m);
         assert!((long_side - 18.0).abs() < 0.5);
         assert!((short_side - 14.0).abs() < 0.5);
-        assert!(direct.populated_fields.iter().any(|field| field == "mass.width"));
+        assert!(direct
+            .populated_fields
+            .iter()
+            .any(|field| field == "mass.width"));
     }
 
     #[test]

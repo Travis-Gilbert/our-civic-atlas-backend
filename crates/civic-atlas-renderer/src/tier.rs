@@ -71,9 +71,7 @@ pub struct TierThresholds {
 
 impl Default for TierThresholds {
     fn default() -> Self {
-        Self {
-            many_photos_min: 8,
-        }
+        Self { many_photos_min: 8 }
     }
 }
 
@@ -92,10 +90,7 @@ impl TierDecision {
     pub fn metadata(&self) -> BTreeMap<String, String> {
         let mut metadata = BTreeMap::new();
         metadata.insert("renderTier".to_string(), self.tier.as_str().to_string());
-        metadata.insert(
-            "renderTierRationale".to_string(),
-            self.rationale.clone(),
-        );
+        metadata.insert("renderTierRationale".to_string(), self.rationale.clone());
         metadata.insert(
             "photoSourceCount".to_string(),
             self.photo_sources.len().to_string(),
@@ -221,7 +216,10 @@ mod tests {
         }
     }
 
-    fn spec_with_sources(mass_sources: Vec<ReconstructionSource>, facade_sources: Vec<ReconstructionSource>) -> ReconstructionSpec {
+    fn spec_with_sources(
+        mass_sources: Vec<ReconstructionSource>,
+        facade_sources: Vec<ReconstructionSource>,
+    ) -> ReconstructionSpec {
         ReconstructionSpec {
             spec_id: "recon-test-1900".to_string(),
             spec_version: 1,
@@ -261,7 +259,10 @@ mod tests {
         let decision = select_tier(&spec, &TierThresholds::default());
         assert_eq!(decision.tier, RenderTier::SingleFacadePhoto);
         assert_eq!(decision.photo_sources.len(), 1);
-        assert_eq!(decision.photo_sources[0].uri, "https://example.org/photos/photo-1.jpg");
+        assert_eq!(
+            decision.photo_sources[0].uri,
+            "https://example.org/photos/photo-1.jpg"
+        );
     }
 
     #[test]
@@ -285,7 +286,9 @@ mod tests {
 
     #[test]
     fn many_photos_select_splatting_tier() {
-        let mass_photos: Vec<_> = (0..8).map(|i| photo_source(&format!("photo-{i}"))).collect();
+        let mass_photos: Vec<_> = (0..8)
+            .map(|i| photo_source(&format!("photo-{i}")))
+            .collect();
         let spec = spec_with_sources(mass_photos, vec![]);
         let decision = select_tier(&spec, &TierThresholds::default());
         assert_eq!(decision.tier, RenderTier::ManyPhotos);

@@ -79,6 +79,47 @@ message IngestArtifactResponse {
   string status = 2;
 }
 
+message MorphologicalPlace {
+  string place_id = 1;
+  string geometry_geojson = 2;
+  map<string, string> metadata = 3;
+}
+
+message MorphologicalMovement {
+  string movement_id = 1;
+  string geometry_geojson = 2;
+  map<string, string> metadata = 3;
+}
+
+message MorphologicalGraphRequest {
+  civic_atlas.v1.TenantContext tenant_context = 1;
+  string model_run_id = 2;
+  repeated MorphologicalPlace places = 3;
+  repeated MorphologicalMovement movements = 4;
+  map<string, string> parameters = 5;
+}
+
+message MorphologicalGraphEdge {
+  string edge_id = 1;
+  string source_id = 2;
+  string source_kind = 3;
+  string relation = 4;
+  string target_id = 5;
+  string target_kind = 6;
+  double confidence = 7;
+  string geometry_geojson = 8;
+  map<string, string> properties = 9;
+}
+
+message MorphologicalGraphResponse {
+  string model_run_id = 1;
+  string status = 2;
+  repeated MorphologicalGraphEdge edges = 3;
+  string model = 4;
+  string model_version = 5;
+  repeated string warnings = 6;
+}
+
 // Civic research search has moved off this proto. The canonical
 // contract is `theseus_search.v1.SearchService` (see
 // `proto/theseus_search/v1/search.proto`, vendored from
@@ -99,4 +140,5 @@ service TheseusBridge {
   rpc GetBatchSpacetimeEmbeddings(BatchSpacetimeEmbeddingRequest) returns (BatchSpacetimeEmbeddingResponse);
   rpc SearchObjects(SearchObjectsRequest) returns (SearchObjectsResponse);
   rpc IngestArtifact(IngestArtifactRequest) returns (IngestArtifactResponse);
+  rpc BuildMorphologicalGraph(MorphologicalGraphRequest) returns (MorphologicalGraphResponse);
 }

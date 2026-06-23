@@ -135,7 +135,13 @@ impl AssetGenerator for SceneFoundryRenderer {
         let glb_bytes = glb::write_glb(&model, &spec, &decision).context("GLB authoring failed")?;
         let geometry = self
             .store
-            .put(&spec.spec_id, spec.spec_version, "massing", "glb", &glb_bytes)
+            .put(
+                &spec.spec_id,
+                spec.spec_version,
+                "massing",
+                "glb",
+                &glb_bytes,
+            )
             .await
             .context("storing massing geometry")?;
 
@@ -168,7 +174,11 @@ impl AssetGenerator for SceneFoundryRenderer {
         };
 
         let manifest_id = format!("scene-foundry:{}:v{}", spec.spec_id, spec.spec_version);
-        let documented = model.parts.iter().filter(|part| part.flag.documented).count();
+        let documented = model
+            .parts
+            .iter()
+            .filter(|part| part.flag.documented)
+            .count();
         let inferred = model.parts.len() - documented;
 
         let mut metadata: BTreeMap<String, String> = decision.metadata();
@@ -188,7 +198,10 @@ impl AssetGenerator for SceneFoundryRenderer {
         metadata.insert("roofForm".to_string(), model.roof_form.as_str().to_string());
 
         let mut geometry_metadata = metadata.clone();
-        geometry_metadata.insert("massingSource".to_string(), "procedural-massing-v1".to_string());
+        geometry_metadata.insert(
+            "massingSource".to_string(),
+            "procedural-massing-v1".to_string(),
+        );
         let mut provenance_metadata = metadata.clone();
         provenance_metadata.insert("recordKind".to_string(), "part-provenance".to_string());
 
@@ -256,9 +269,21 @@ mod tests {
                 mass: Some(Mass {
                     provenance: Some(evidence(ReconstructionSourceType::Map, "sanborn-1")),
                     stories: 2,
-                    height: Some(DimensionRange { min: Some(7.0), max: Some(7.0), unit: "m".into() }),
-                    width: Some(DimensionRange { min: Some(10.0), max: Some(10.0), unit: "m".into() }),
-                    depth: Some(DimensionRange { min: Some(14.0), max: Some(14.0), unit: "m".into() }),
+                    height: Some(DimensionRange {
+                        min: Some(7.0),
+                        max: Some(7.0),
+                        unit: "m".into(),
+                    }),
+                    width: Some(DimensionRange {
+                        min: Some(10.0),
+                        max: Some(10.0),
+                        unit: "m".into(),
+                    }),
+                    depth: Some(DimensionRange {
+                        min: Some(14.0),
+                        max: Some(14.0),
+                        unit: "m".into(),
+                    }),
                     ..Default::default()
                 }),
                 facades: vec![Facade {
@@ -316,14 +341,19 @@ mod tests {
         let provenance_asset = &manifest.assets[1];
         assert_eq!(provenance_asset.asset_type, ASSET_TYPE_PROVENANCE);
         assert!(provenance_asset.uri.ends_with(".json"));
-        let record_path = dir
-            .path()
-            .join(provenance_asset.uri.trim_start_matches("/assets/scene-foundry/"));
+        let record_path = dir.path().join(
+            provenance_asset
+                .uri
+                .trim_start_matches("/assets/scene-foundry/"),
+        );
         let record: ProvenanceRecord =
             serde_json::from_slice(&std::fs::read(record_path).unwrap()).unwrap();
         assert_eq!(record.spec_id, "recon-whaley-1900");
         assert!(!record.parts.is_empty());
-        assert!(record.parts.iter().all(|part| part.node_id.starts_with("reconstruction-node:")));
+        assert!(record
+            .parts
+            .iter()
+            .all(|part| part.node_id.starts_with("reconstruction-node:")));
         // Texture provenance recorded as procedural for the massing render.
         assert!(record
             .texture
@@ -342,7 +372,10 @@ mod tests {
         let renderer = SceneFoundryRenderer::new(store);
 
         let manifest = renderer.generate(&merged_spec(true)).await.unwrap();
-        assert_eq!(manifest.metadata["renderTier"], "tier_a_single_facade_photo");
+        assert_eq!(
+            manifest.metadata["renderTier"],
+            "tier_a_single_facade_photo"
+        );
         assert_eq!(manifest.metadata["photoSourceCount"], "1");
         assert_eq!(manifest.metadata["refinementKind"], "single_facade_fit");
         assert_eq!(manifest.status, MANIFEST_STATUS_COMPLETED);
@@ -356,10 +389,7 @@ mod tests {
 
         let first = renderer.generate(&merged_spec(false)).await.unwrap();
         let second = renderer.generate(&merged_spec(false)).await.unwrap();
-        assert_eq!(
-            first.assets[0].content_hash,
-            second.assets[0].content_hash
-        );
+        assert_eq!(first.assets[0].content_hash, second.assets[0].content_hash);
         assert_eq!(first.assets[0].uri, second.assets[0].uri);
     }
 }

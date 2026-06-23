@@ -132,10 +132,8 @@ impl ServerHandler for ReconstructionMcpServer {
         // ServerInfo (InitializeResult) and Implementation are #[non_exhaustive]:
         // build via their public constructors, then set the fields we own.
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
-        info.server_info = Implementation::new(
-            "civic-atlas-reconstruction-mcp",
-            env!("CARGO_PKG_VERSION"),
-        );
+        info.server_info =
+            Implementation::new("civic-atlas-reconstruction-mcp", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
             "Call `reconstruct` with structured building evidence and constraints to run the \
             Civic Atlas procedural reconstruction pipeline. It returns the asset manifest and \

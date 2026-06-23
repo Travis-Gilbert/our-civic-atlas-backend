@@ -26,6 +26,7 @@ sha2.workspace = true
 sqlx.workspace = true
 svix.workspace = true
 tenant-resolver = { path = "../tenant-resolver" }
+theseus-client = { path = "../theseus-client" }
 tokio.workspace = true
 tonic.workspace = true
 tonic-web.workspace = true

@@ -163,7 +163,9 @@ mod tests {
             .await
             .unwrap();
         assert!(stored.content_hash.starts_with("sha256-"));
-        assert!(stored.uri.starts_with("/assets/scene-foundry/recon-whaley-1900/v1/massing.sha256-"));
+        assert!(stored
+            .uri
+            .starts_with("/assets/scene-foundry/recon-whaley-1900/v1/massing.sha256-"));
         assert!(stored.uri.ends_with(".glb"));
         let on_disk = std::fs::read(dir.path().join(&stored.key)).unwrap();
         assert_eq!(on_disk, b"glTF-test-bytes");

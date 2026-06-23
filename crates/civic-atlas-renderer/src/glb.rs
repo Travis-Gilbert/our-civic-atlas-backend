@@ -57,19 +57,21 @@ pub fn write_glb(
 
     for part in &model.parts {
         // Material (deduped by name).
-        let material_id = *material_index.entry(part.material_name.clone()).or_insert_with(|| {
-            let index = materials.len();
-            materials.push(json!({
-                "name": part.material_name,
-                "doubleSided": true,
-                "pbrMetallicRoughness": {
-                    "baseColorFactor": part.base_color,
-                    "metallicFactor": 0.0,
-                    "roughnessFactor": 0.72
-                }
-            }));
-            index
-        });
+        let material_id = *material_index
+            .entry(part.material_name.clone())
+            .or_insert_with(|| {
+                let index = materials.len();
+                materials.push(json!({
+                    "name": part.material_name,
+                    "doubleSided": true,
+                    "pbrMetallicRoughness": {
+                        "baseColorFactor": part.base_color,
+                        "metallicFactor": 0.0,
+                        "roughnessFactor": 0.72
+                    }
+                }));
+                index
+            });
 
         // Vertex data: positions then normals, one ARRAY_BUFFER view each.
         let vertex_count = part.positions.len();
@@ -260,9 +262,21 @@ mod tests {
             mass: Some(Mass {
                 provenance: Some(provenance.clone()),
                 stories: 2,
-                height: Some(DimensionRange { min: Some(7.0), max: Some(7.0), unit: "m".to_string() }),
-                width: Some(DimensionRange { min: Some(10.0), max: Some(10.0), unit: "m".to_string() }),
-                depth: Some(DimensionRange { min: Some(14.0), max: Some(14.0), unit: "m".to_string() }),
+                height: Some(DimensionRange {
+                    min: Some(7.0),
+                    max: Some(7.0),
+                    unit: "m".to_string(),
+                }),
+                width: Some(DimensionRange {
+                    min: Some(10.0),
+                    max: Some(10.0),
+                    unit: "m".to_string(),
+                }),
+                depth: Some(DimensionRange {
+                    min: Some(14.0),
+                    max: Some(14.0),
+                    unit: "m".to_string(),
+                }),
                 ..Default::default()
             }),
             facades: vec![Facade {
@@ -310,7 +324,9 @@ mod tests {
         let mut ghost_walls = 0;
         let mut documented_parts = 0;
         for node in document.nodes() {
-            let Some(extras) = node.extras().as_ref() else { continue };
+            let Some(extras) = node.extras().as_ref() else {
+                continue;
+            };
             let extras: serde_json::Value = serde_json::from_str(extras.get()).unwrap();
             if let Some(provenance) = extras.get("provenance") {
                 if provenance["documented"].as_bool() == Some(true) {
@@ -328,7 +344,10 @@ mod tests {
                 }
             }
         }
-        assert!(documented_parts >= 3, "front facade + grid + roof + mass documented");
+        assert!(
+            documented_parts >= 3,
+            "front facade + grid + roof + mass documented"
+        );
         assert!(ghost_walls >= 3, "three undocumented walls render flagged");
 
         // Mesh geometry is non-degenerate: positions exist and span meters.

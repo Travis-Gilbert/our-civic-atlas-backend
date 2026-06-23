@@ -70,6 +70,11 @@ class TheseusBridgeStub(object):
                 request_serializer=theseus__bridge_dot_v1_dot_bridge__pb2.IngestArtifactRequest.SerializeToString,
                 response_deserializer=theseus__bridge_dot_v1_dot_bridge__pb2.IngestArtifactResponse.FromString,
                 _registered_method=True)
+        self.BuildMorphologicalGraph = channel.unary_unary(
+                '/theseus_bridge.v1.TheseusBridge/BuildMorphologicalGraph',
+                request_serializer=theseus__bridge_dot_v1_dot_bridge__pb2.MorphologicalGraphRequest.SerializeToString,
+                response_deserializer=theseus__bridge_dot_v1_dot_bridge__pb2.MorphologicalGraphResponse.FromString,
+                _registered_method=True)
 
 
 class TheseusBridgeServicer(object):
@@ -119,6 +124,12 @@ class TheseusBridgeServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def BuildMorphologicalGraph(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_TheseusBridgeServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -146,6 +157,11 @@ def add_TheseusBridgeServicer_to_server(servicer, server):
                     servicer.IngestArtifact,
                     request_deserializer=theseus__bridge_dot_v1_dot_bridge__pb2.IngestArtifactRequest.FromString,
                     response_serializer=theseus__bridge_dot_v1_dot_bridge__pb2.IngestArtifactResponse.SerializeToString,
+            ),
+            'BuildMorphologicalGraph': grpc.unary_unary_rpc_method_handler(
+                    servicer.BuildMorphologicalGraph,
+                    request_deserializer=theseus__bridge_dot_v1_dot_bridge__pb2.MorphologicalGraphRequest.FromString,
+                    response_serializer=theseus__bridge_dot_v1_dot_bridge__pb2.MorphologicalGraphResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -294,6 +310,33 @@ class TheseusBridge(object):
             '/theseus_bridge.v1.TheseusBridge/IngestArtifact',
             theseus__bridge_dot_v1_dot_bridge__pb2.IngestArtifactRequest.SerializeToString,
             theseus__bridge_dot_v1_dot_bridge__pb2.IngestArtifactResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def BuildMorphologicalGraph(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/theseus_bridge.v1.TheseusBridge/BuildMorphologicalGraph',
+            theseus__bridge_dot_v1_dot_bridge__pb2.MorphologicalGraphRequest.SerializeToString,
+            theseus__bridge_dot_v1_dot_bridge__pb2.MorphologicalGraphResponse.FromString,
             options,
             channel_credentials,
             insecure,

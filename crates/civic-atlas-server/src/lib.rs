@@ -49,6 +49,7 @@ use uuid::Uuid;
 pub struct AtlasState {
     places: Arc<Vec<CivicObject>>,
     db: Option<PgPool>,
+    theseus_bridge_url: Option<String>,
 }
 
 impl AtlasState {
@@ -71,9 +72,13 @@ impl AtlasState {
             }
             _ => None,
         };
+        let theseus_bridge_url = env::var("THESEUS_BRIDGE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty());
         Ok(Self {
             places: Arc::new(places),
             db,
+            theseus_bridge_url,
         })
     }
 
@@ -87,6 +92,10 @@ impl AtlasState {
 
     pub fn db_pool(&self) -> Option<&PgPool> {
         self.db.as_ref()
+    }
+
+    pub fn theseus_bridge_url(&self) -> Option<&str> {
+        self.theseus_bridge_url.as_deref()
     }
 
     /// Apply embedded SQL migrations against the live PostGIS pool.
@@ -2049,6 +2058,7 @@ mod tests {
         let state = AtlasState {
             places: Arc::new(fixture::seed_places("flint")),
             db: None,
+            theseus_bridge_url: None,
         };
 
         assert_eq!(state.places_for_tenant("flint").len(), 3);
@@ -2117,6 +2127,7 @@ mod tests {
         let state = AtlasState {
             places: Arc::new(fixture::seed_places("flint")),
             db: None,
+            theseus_bridge_url: None,
         };
 
         let result = event_planner_sse(
