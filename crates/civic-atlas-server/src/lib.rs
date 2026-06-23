@@ -2058,6 +2058,7 @@ mod tests {
         let state = AtlasState {
             places: Arc::new(fixture::seed_places("flint")),
             db: None,
+            theseus_bridge_url: None,
         };
 
         assert_eq!(state.places_for_tenant("flint").len(), 3);
@@ -2126,6 +2127,7 @@ mod tests {
         let state = AtlasState {
             places: Arc::new(fixture::seed_places("flint")),
             db: None,
+            theseus_bridge_url: None,
         };
 
         let result = event_planner_sse(
