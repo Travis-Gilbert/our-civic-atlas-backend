@@ -613,6 +613,7 @@ dependencies = [
  "sqlx",
  "svix",
  "tenant-resolver",
+ "theseus-client",
  "tokio",
  "tonic",
  "tonic-web",

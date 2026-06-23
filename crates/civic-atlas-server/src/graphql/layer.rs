@@ -14,9 +14,13 @@ use civic_atlas_types::civic_atlas::v1::{
 use civic_atlas_types::event_planner::{
     EventLayerListRequest, EventPlannerService, PlacementListRequest,
 };
+use civic_atlas_types::theseus_bridge::v1::{
+    MorphologicalGraphEdge, MorphologicalGraphRequest, MorphologicalGraphResponse,
+    MorphologicalMovement, MorphologicalPlace,
+};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
-use tonic::Request;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use tonic::{Code, Request};
 
 use crate::event_planner::EventPlannerGrpcService;
 use crate::graphql::reconstruction::{
@@ -30,6 +34,8 @@ const DEFAULT_TENANT_SLUG: &str = "flint";
 const TRAFFIC_NETWORK_ID: &str = "flint-downtown";
 const TRAFFIC_LAYER_ID: &str = "layer:traffic:flint-downtown";
 const RECONSTRUCTION_LAYER_ID: &str = "layer:reconstruction:flint:historical";
+const MORPHOLOGICAL_LAYER_ID: &str = "layer:morphological-graph:flint:city2graph";
+const MORPHOLOGICAL_MODEL_RUN_ID: &str = "model-run:morphological-graph:city2graph:flint";
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum LayerKind {
@@ -272,6 +278,9 @@ impl LayerQuery {
                 )
             }
         }
+        if state.theseus_bridge_url().is_some() {
+            layers.push(morphological_layer());
+        }
         match event_surface_layers(state, &tenant_slug).await {
             Ok(event_layers) => layers.extend(event_layers),
             Err(error) => {
@@ -310,6 +319,9 @@ impl LayerQuery {
         if id == RECONSTRUCTION_LAYER_ID {
             return reconstruction_layer_view(state, min_confidence).await;
         }
+        if id == MORPHOLOGICAL_LAYER_ID || id == "morphological-graph:city2graph" {
+            return morphological_layer_view(state, min_confidence).await;
+        }
         if let Some(event_slug) = id.strip_prefix("layer:event-surface:flint:") {
             return event_surface_layer_view(
                 state,
@@ -336,6 +348,9 @@ impl LayerQuery {
         }
         if id == RECONSTRUCTION_LAYER_ID {
             return Ok(Some(reconstruction_recipe(&generated_at)));
+        }
+        if id == MORPHOLOGICAL_LAYER_ID || id == "morphological-graph:city2graph" {
+            return Ok(Some(morphological_recipe(&generated_at)));
         }
         if id.starts_with("layer:event-surface:flint:") {
             return Ok(Some(event_surface_recipe(layer_id, &generated_at)));
@@ -642,6 +657,188 @@ fn reconstruction_record(reconstruction: &HistoricalReconstruction) -> LayerReco
     }
 }
 
+fn morphological_layer() -> Layer {
+    let generated_at = chrono::Utc::now().to_rfc3339();
+    Layer {
+        id: ID(MORPHOLOGICAL_LAYER_ID.to_string()),
+        kind: LayerKind::ModelOutput,
+        source_action: LayerSourceAction::Model,
+        title: "Flint morphological relation graph".to_string(),
+        lifecycle_state: LayerLifecycleState::Candidate,
+        renderer_boundary_id: "data_overlay".to_string(),
+        record_count: 0,
+        temporal_range: None,
+        provenance_summary: single_provenance(0, 0.0, ReviewStatus::NeedsReview),
+        updated_at: generated_at,
+    }
+}
+
+async fn morphological_layer_view(
+    state: &AtlasState,
+    min_confidence: f64,
+) -> async_graphql::Result<LayerView> {
+    let generated_at = chrono::Utc::now().to_rfc3339();
+    let Some(response) = build_morphological_graph(state).await? else {
+        return Ok(empty_layer_view(
+            ID(MORPHOLOGICAL_LAYER_ID.to_string()),
+            LayerViewStatus::Unavailable,
+        ));
+    };
+    let records = response
+        .edges
+        .iter()
+        .map(|edge| morphological_record(edge, &response))
+        .filter(|record| public_projection(record, min_confidence))
+        .collect::<Vec<_>>();
+
+    Ok(LayerView {
+        layer_id: ID(MORPHOLOGICAL_LAYER_ID.to_string()),
+        status: LayerViewStatus::ReviewPending,
+        summary: view_summary(&records),
+        records,
+        generated_at,
+    })
+}
+
+async fn build_morphological_graph(
+    state: &AtlasState,
+) -> async_graphql::Result<Option<MorphologicalGraphResponse>> {
+    let Some(url) = state.theseus_bridge_url() else {
+        return Ok(None);
+    };
+    let tenant_slug = DEFAULT_TENANT_SLUG.to_string();
+    let request = MorphologicalGraphRequest {
+        tenant_context: Some(tenant_context(&tenant_slug)),
+        model_run_id: MORPHOLOGICAL_MODEL_RUN_ID.to_string(),
+        places: morphological_places(state, &tenant_slug),
+        movements: morphological_movements(state).await?,
+        parameters: HashMap::from([
+            (
+                "producer".to_string(),
+                "city2graph.morphological_graph".to_string(),
+            ),
+            (
+                "edge_schema".to_string(),
+                "touched_to,connected_to,faced_to".to_string(),
+            ),
+        ]),
+    };
+    if request.places.is_empty() || request.movements.is_empty() {
+        return Ok(Some(MorphologicalGraphResponse {
+            model_run_id: request.model_run_id,
+            status: "insufficient_inputs".to_string(),
+            edges: Vec::new(),
+            model: "city2graph".to_string(),
+            model_version: String::new(),
+            warnings: vec![
+                "morphological graph requires non-null place geometry and street centerlines"
+                    .to_string(),
+            ],
+        }));
+    }
+
+    let mut client = theseus_client::TheseusClient::connect(url)
+        .await
+        .map_err(|error| {
+            async_graphql::Error::new(format!("Theseus bridge connect failed: {error}"))
+        })?;
+    match client
+        .bridge()
+        .build_morphological_graph(Request::new(request))
+        .await
+    {
+        Ok(response) => Ok(Some(response.into_inner())),
+        Err(status) if matches!(status.code(), Code::Unavailable | Code::Unimplemented) => Ok(None),
+        Err(status) => Err(graphql_status(status)),
+    }
+}
+
+fn morphological_places(state: &AtlasState, tenant_slug: &str) -> Vec<MorphologicalPlace> {
+    state
+        .places_for_tenant(tenant_slug)
+        .into_iter()
+        .filter(|place| {
+            let geometry = place.geometry_json.trim();
+            !geometry.is_empty() && geometry != "null"
+        })
+        .map(|place| MorphologicalPlace {
+            place_id: place.id,
+            geometry_geojson: place.geometry_json,
+            metadata: HashMap::from([
+                ("name".to_string(), place.name),
+                ("object_type".to_string(), place.object_type),
+            ]),
+        })
+        .collect()
+}
+
+async fn morphological_movements(
+    state: &AtlasState,
+) -> async_graphql::Result<Vec<MorphologicalMovement>> {
+    let snapshot = snapshot_for_network(state, TRAFFIC_NETWORK_ID).await?;
+    Ok(snapshot
+        .segments
+        .into_iter()
+        .map(|segment| MorphologicalMovement {
+            movement_id: segment.segment_id.0,
+            geometry_geojson: segment.geometry.0.to_string(),
+            metadata: HashMap::from([
+                ("corridor_name".to_string(), segment.corridor_name),
+                ("direction_label".to_string(), segment.direction_label),
+            ]),
+        })
+        .collect())
+}
+
+fn morphological_record(
+    edge: &MorphologicalGraphEdge,
+    response: &MorphologicalGraphResponse,
+) -> LayerRecord {
+    let confidence = if edge.confidence > 0.0 {
+        edge.confidence.min(1.0)
+    } else {
+        1.0
+    };
+    let geometry = if edge.geometry_geojson.trim().is_empty() {
+        json!(null)
+    } else {
+        serde_json::from_str::<Value>(&edge.geometry_geojson).unwrap_or_else(|_| json!(null))
+    };
+    let id = if edge.edge_id.trim().is_empty() {
+        format!(
+            "morphological:{}:{}:{}",
+            edge.source_id, edge.relation, edge.target_id
+        )
+    } else {
+        edge.edge_id.clone()
+    };
+
+    LayerRecord {
+        id: ID(id),
+        geometry: Json(geometry),
+        properties: Json(json!({
+            "kind": "morphological_graph",
+            "sourceId": &edge.source_id,
+            "sourceKind": &edge.source_kind,
+            "relation": &edge.relation,
+            "targetId": &edge.target_id,
+            "targetKind": &edge.target_kind,
+            "modelRunId": &response.model_run_id,
+            "model": &response.model,
+            "modelVersion": empty_to_null(&response.model_version),
+            "status": &response.status,
+            "properties": &edge.properties,
+            "warnings": &response.warnings,
+        })),
+        confidence,
+        review_status: ReviewStatus::Corroborated,
+        visibility: VisibilityLevel::Public,
+        provenance_summary: single_provenance(1, confidence, ReviewStatus::Corroborated),
+        observed_at: None,
+        expires_at: None,
+    }
+}
+
 async fn list_event_layers(
     state: &AtlasState,
     tenant_slug: &str,
@@ -889,6 +1086,37 @@ fn reconstruction_recipe(updated_at: &str) -> LayerRecipe {
             deck_gl_layer_type: "ScenegraphLayer".to_string(),
             color_field: Some("confidence".to_string()),
             scale_field: Some("heightMeters".to_string()),
+            opacity_by_confidence: true,
+        },
+        provenance_policy: LayerProvenancePolicy {
+            visibility_floor: VisibilityLevel::Public,
+            ghost_inferred_records: true,
+        },
+        updated_at: updated_at.to_string(),
+    }
+}
+
+fn morphological_recipe(updated_at: &str) -> LayerRecipe {
+    LayerRecipe {
+        id: ID("recipe:morphological-graph:flint:city2graph".to_string()),
+        layer_id: ID(MORPHOLOGICAL_LAYER_ID.to_string()),
+        title: "City2Graph morphological relation recipe".to_string(),
+        source_ref: LayerRecipeSourceRef {
+            layer_id: Some(ID(MORPHOLOGICAL_LAYER_ID.to_string())),
+            search_query: None,
+            upload_id: None,
+            model_run_id: Some(ID(MORPHOLOGICAL_MODEL_RUN_ID.to_string())),
+        },
+        transform: Some(LayerRecipeTransform {
+            duckdb_sql: Some(
+                "SELECT * FROM layer_records WHERE relation IN ('touched_to', 'connected_to', 'faced_to')".to_string(),
+            ),
+        }),
+        display_encoding: LayerDisplayEncoding {
+            renderer_boundary_id: "data_overlay".to_string(),
+            deck_gl_layer_type: "GeoJsonLayer".to_string(),
+            color_field: Some("relation".to_string()),
+            scale_field: None,
             opacity_by_confidence: true,
         },
         provenance_policy: LayerProvenancePolicy {
