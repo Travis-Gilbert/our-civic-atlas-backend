@@ -1,0 +1,6 @@
+interface:
+  display_name: "Our Civic Atlas Backend"
+  short_description: "Repo-specific patterns and workflows for our-civic-atlas-backend"
+  default_prompt: "Use the our-civic-atlas-backend repo skill to follow existing architecture, testing, and workflow conventions."
+policy:
+  allow_implicit_invocation: true
